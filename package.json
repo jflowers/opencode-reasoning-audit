@@ -1,0 +1,25 @@
+{
+  "name": "opencode-reasoning-audit",
+  "version": "1.0.0",
+  "description": "AI reasoning audit and process supervision middleware plugin for OpenCode with narrative stripping, tool intent verification, and self-correction injection loops.",
+  "main": "index.ts",
+  "module": "index.ts",
+  "type": "module",
+  "scripts": {
+    "test": "bun test",
+    "test:node": "node --test test/audit.test.ts",
+    "install:local": "bunx oh-my-opencode install --local ."
+  },
+  "keywords": [
+    "opencode",
+    "oh-my-opencode",
+    "reasoning-audit",
+    "process-supervision",
+    "chain-of-thought",
+    "ai-safety"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "bun-types": "latest"
+  }
+}
