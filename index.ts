@@ -4,12 +4,15 @@
  * Installation: bunx oh-my-opencode install --local .
  */
 
-import { stripNarrative } from './src/stripper';
-import { runPeerAudit, type AuditConfig } from './src/auditor';
-import { verifyToolIntent } from './src/tool-guard';
+import { stripNarrative } from './src/stripper.ts';
+import { runPeerAudit, resolveAuditorConfig, type AuditConfig } from './src/auditor.ts';
+import { verifyToolIntent } from './src/tool-guard.ts';
 
 export const pluginConfig: AuditConfig = {
-  auditorModel: 'gemini-3.8-flash',
+  // Model slug in "<provider>/<model-id>" format (can be overridden via OPENCODE_AUDITOR_MODEL or opencode.json)
+  auditorModel: (typeof process !== 'undefined' && process.env?.OPENCODE_AUDITOR_MODEL) || 'google/gemini-3.8-flash',
+  // Model variant / reasoning effort: 'minimal' | 'low' | 'medium' | 'high' | 'default'
+  auditorVariant: ((typeof process !== 'undefined' && process.env?.OPENCODE_AUDITOR_VARIANT) as AuditConfig['auditorVariant']) || 'low',
   stripMode: 'code_and_math',
   injectRole: 'user',
   maxRegenerations: 2,
@@ -32,22 +35,23 @@ export default {
   async onMessageUpdated(message: any, session: any) {
     if (message.role === 'assistant' && Array.isArray(message.reasoning_steps) && !message.is_audited) {
       const sessionId = session?.id || 'default-session';
+      const activeConfig = resolveAuditorConfig(pluginConfig, session);
 
       // 1. Process Supervision: Strip conversational narrative and isolate formal steps
-      const cleanSteps = stripNarrative(message.reasoning_steps, pluginConfig.stripMode);
+      const cleanSteps = stripNarrative(message.reasoning_steps, activeConfig.stripMode);
       sessionVerifiedSteps.set(sessionId, cleanSteps);
 
-      // 2. Multi-Agent Peer Review via independent auditor model
-      const auditResult = await runPeerAudit(cleanSteps, pluginConfig);
+      // 2. Multi-Agent Peer Review via independent auditor model (slug + variant)
+      const auditResult = await runPeerAudit(cleanSteps, activeConfig, session);
 
       if (!auditResult.passed) {
         // Mark this specific message so we do not get stuck in an infinite audit loop
         message.is_audited = true;
 
         const currentRetries = sessionRegenerationCounts.get(sessionId) || 0;
-        if (currentRetries >= pluginConfig.maxRegenerations) {
+        if (currentRetries >= activeConfig.maxRegenerations) {
           message.content =
-            `⚠️ [Audit Failed after ${currentRetries} self-correction attempts: ${auditResult.critique}] \n\n` +
+            `⚠️ [Audit Failed after ${currentRetries} self-correction attempts (${activeConfig.auditorModel}@${activeConfig.auditorVariant}): ${auditResult.critique}] \n\n` +
             message.content;
           return;
         }
@@ -57,8 +61,8 @@ export default {
         // 3. Inject a prompt challenging the primary agent with the auditor's structured critique
         if (session && typeof session.injectMessage === 'function') {
           await session.injectMessage({
-            role: pluginConfig.injectRole,
-            content: `⚠️ CRITICAL LOGIC ERROR DETECTED BY AUDITOR:
+            role: activeConfig.injectRole,
+            content: `⚠️ CRITICAL LOGIC ERROR DETECTED BY AUDITOR (${activeConfig.auditorModel} [${activeConfig.auditorVariant}]):
 ${auditResult.critique}
 
 Please re-evaluate your chain of thought, correct the step listed above, and provide a revised answer.`,
