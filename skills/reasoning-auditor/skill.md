@@ -2,11 +2,13 @@
 name: reasoning-auditor
 description: Process supervision and multi-agent Chain-of-Thought auditor skill for OpenCode (~/.opencode/skills/reasoning-auditor/skill.md)
 version: 1.0.0
+model: google/gemini-3.8-flash
+variant: low
 ---
 
 # OpenCode Skill: Process Supervisor & Reasoning Auditor
 
-This skill enforces **Process Supervision** and **Self-Correction Loops** inside OpenCode's native layered prompt hierarchy.
+This skill enforces **Process Supervision** and **Self-Correction Loops** inside OpenCode's native layered prompt hierarchy using model slug `google/gemini-3.8-flash` (variant: `low`).
 
 ## 1. Role & Operating Principles
 
