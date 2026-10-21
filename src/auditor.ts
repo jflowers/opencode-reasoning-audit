@@ -3,8 +3,13 @@
  * Cross-checks stripped reasoning steps using deterministic invariants + independent LLM verification.
  */
 
+export type AuditorVariant = 'minimal' | 'low' | 'medium' | 'high' | 'default';
+
 export interface AuditConfig {
+  /** Provider + model slug, e.g. 'openai/o3-mini', 'anthropic/claude-3-7-sonnet', 'google/gemini-3.8-flash' */
   auditorModel: string;
+  /** Reasoning effort / thinking variant passed to OpenCode provider */
+  auditorVariant: AuditorVariant;
   stripMode: 'code_and_math' | 'balanced' | 'strict';
   injectRole: 'user' | 'system';
   maxRegenerations: number;
@@ -16,6 +21,27 @@ export interface PeerAuditOutcome {
   passed: boolean;
   failedStep?: number;
   critique: string;
+}
+
+/**
+ * Resolves effective auditor model slug & variant with precedence:
+ * 1. Session-level opencode.json plugin overrides (session.config.plugins['opencode-reasoning-audit'])
+ * 2. Environment variables (OPENCODE_AUDITOR_MODEL, OPENCODE_AUDITOR_VARIANT)
+ * 3. Default pluginConfig in index.ts
+ */
+export function resolveAuditorConfig(base: AuditConfig, session?: any): AuditConfig {
+  const sessionPluginCfg = session?.config?.plugins?.['opencode-reasoning-audit'] || {};
+  return {
+    ...base,
+    auditorModel:
+      sessionPluginCfg.auditorModel ||
+      (typeof process !== 'undefined' ? process.env?.OPENCODE_AUDITOR_MODEL : undefined) ||
+      base.auditorModel,
+    auditorVariant:
+      sessionPluginCfg.auditorVariant ||
+      (typeof process !== 'undefined' ? (process.env?.OPENCODE_AUDITOR_VARIANT as AuditorVariant) : undefined) ||
+      base.auditorVariant,
+  };
 }
 
 export const AUDITOR_SYSTEM_PROMPT = `You are an independent Process Supervisor and Formal Reasoning Auditor inside OpenCode.
@@ -79,7 +105,8 @@ export function checkDeterministicInvariants(steps: string[]): PeerAuditOutcome 
 
 export async function runPeerAudit(
   steps: string[],
-  config: AuditConfig
+  config: AuditConfig,
+  session?: any
 ): Promise<PeerAuditOutcome> {
   if (steps.length === 0) {
     return { passed: true, critique: 'No formal steps to audit.' };
@@ -91,7 +118,25 @@ export async function runPeerAudit(
     return localFailure;
   }
 
-  // Optional external LLM Peer Auditor hook if OPENCODE_AUDITOR_ENDPOINT is configured
+  // 1. Native OpenCode provider client if available on the active session
+  if (session?.provider && typeof session.provider.complete === 'function') {
+    try {
+      const result = await session.provider.complete({
+        model: config.auditorModel,
+        variant: config.auditorVariant,
+        system: AUDITOR_SYSTEM_PROMPT,
+        prompt: steps.map((s, idx) => `Step ${idx + 1}: ${s}`).join('\n'),
+        responseFormat: 'json',
+      });
+      if (result && typeof result.passed === 'boolean') {
+        return result as PeerAuditOutcome;
+      }
+    } catch {
+      // Fall through to HTTP endpoint or deterministic check
+    }
+  }
+
+  // 2. Optional external LLM Peer Auditor HTTP hook if OPENCODE_AUDITOR_ENDPOINT is configured
   const endpoint = typeof process !== 'undefined' ? process.env?.OPENCODE_AUDITOR_ENDPOINT : undefined;
   if (endpoint) {
     try {
@@ -100,6 +145,7 @@ export async function runPeerAudit(
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           model: config.auditorModel,
+          variant: config.auditorVariant,
           systemPrompt: AUDITOR_SYSTEM_PROMPT,
           steps,
         }),
