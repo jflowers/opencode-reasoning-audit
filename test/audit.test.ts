@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import plugin from '../index.ts';
 import { stripNarrative } from '../src/stripper.ts';
-import { verifyToolIntent } from '../src/tool-guard.ts';
+import { resolveAuditorConfig } from '../src/auditor.ts';
 
 test('stripNarrative isolates code and math steps', () => {
   const steps = [
@@ -12,6 +12,32 @@ test('stripNarrative isolates code and math steps', () => {
   ];
   const cleaned = stripNarrative(steps, 'code_and_math');
   assert.equal(cleaned.length, 2);
+});
+
+test('resolveAuditorConfig respects session model slug and variant overrides', () => {
+  const resolved = resolveAuditorConfig(
+    {
+      auditorModel: 'google/gemini-3.8-flash',
+      auditorVariant: 'low',
+      stripMode: 'code_and_math',
+      injectRole: 'user',
+      maxRegenerations: 2,
+      blockRewardHacking: true,
+      requireStepReferenceInTools: true,
+    },
+    {
+      config: {
+        plugins: {
+          'opencode-reasoning-audit': {
+            auditorModel: 'openai/o3-mini',
+            auditorVariant: 'high',
+          },
+        },
+      },
+    }
+  );
+  assert.equal(resolved.auditorModel, 'openai/o3-mini');
+  assert.equal(resolved.auditorVariant, 'high');
 });
 
 test('onMessageUpdated injects challenge and triggers regenerate on math error', async () => {
