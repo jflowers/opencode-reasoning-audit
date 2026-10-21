@@ -4,7 +4,7 @@
  * or are absent from the verified reasoning trace.
  */
 
-import type { AuditConfig } from './auditor';
+import type { AuditConfig } from './auditor.ts';
 
 export interface ToolVerificationResult {
   allowed: boolean;
