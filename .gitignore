@@ -1,4 +1,6 @@
 # Unbound Force — managed by uf init
+# Dependencies (bun add created node_modules/ at repo root — task 3.1)
+node_modules/
 # Runtime data under .uf/ (databases, caches, locks, logs)
 .uf/artifacts/
 .uf/dewey/graph.db
