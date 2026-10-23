@@ -68,9 +68,14 @@ the public API's limits.
 - **Configuration**: `OPENCODE_AUDITOR_ENDPOINT` removed;
   `OPENCODE_AUDITOR_MODEL` / `OPENCODE_AUDITOR_VARIANT` retained and
   now select the auditor side session.
-- **Dependencies**: peer dependency on `@opencode-ai/plugin`
-  (public 1.19-era hooks; `experimental.*` hooks acknowledged as
-  moving targets).
+- **Dependencies**: regular runtime dependency on
+  `@opencode-ai/plugin` (public 1.19-era hooks; `experimental.*`
+  hooks acknowledged as moving targets). Amended per spike 1.4:
+  package-directory plugin entries resolve imports from the repo
+  root, not `.opencode/node_modules`, so the entry's
+  `import ... from '@opencode-ai/plugin'` needs the package
+  installed at the repo root — a peer dependency would leave it
+  unresolved at load time.
 - **Docs**: `README.md` rewrite, `CHANGELOG.md` entry, `AGENTS.md`
   structure section, documentation issue before merge.
 - **Out of scope**: AISDK model wrapping / streaming reasoning

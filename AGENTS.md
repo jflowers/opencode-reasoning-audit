@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-OpenCode middleware plugin that audits, interrupts, and repairs AI reasoning steps before the AI completes its action. It hooks `onMessageUpdated` and `onToolExecute`, strips persuasive narrative from Chain-of-Thought steps, runs an independent peer-audit model over the formal steps, and injects structured critiques that trigger self-correction via `session.regenerate()`.
+OpenCode plugin that audits, steers, and interrupts AI reasoning while the agent works. It hooks `event` (completed reasoning parts), `chat.message` (session goal), `tool.execute.before`/`tool.execute.after` (tool guard, solved-items log), and `experimental.chat.system.transform` (supervisor memo); strips persuasive narrative from Chain-of-Thought steps, runs an independent peer audit in a dedicated side session, delivers failed-audit critiques by steering the session via `promptAsync` (interrupting first on severe findings), and blocks reward-hacking tool calls before execution.
 
 - **Type**: OpenCode middleware plugin (TypeScript library)
 - **Runtime**: Bun (primary) / Node 22+ (fallback)
@@ -12,14 +12,18 @@ OpenCode middleware plugin that audits, interrupts, and repairs AI reasoning ste
 ## Build & Test Commands
 
 ```bash
+# Install dependencies (the plugin entry imports @opencode-ai/plugin)
+bun install
+
 # Test (Bun — primary)
 bun test
 
 # Test (Node 22+)
-node --test test/audit.test.ts
+node --test test/audit.test.ts test/memo.test.ts
 
 # Register the plugin with OpenCode (local development)
-bunx oh-my-opencode install --local .
+# Either add "./index.ts" to the "plugin" array in opencode.json, or:
+opencode plugin "$(pwd)"
 ```
 
 - No build step: OpenCode executes the TypeScript directly.
@@ -30,13 +34,15 @@ bunx oh-my-opencode install --local .
 
 ```text
 opencode-reasoning-audit/
-├── index.ts               # Plugin entry: onMessageUpdated/onToolExecute hooks, pluginConfig
+├── index.ts               # Plugin entry: Hooks API wiring (event, chat.message, tool.execute), pluginConfig
 ├── src/
-│   ├── auditor.ts         # Peer audit: config resolution, deterministic invariants, LLM audit
+│   ├── auditor.ts         # Peer audit: config resolution, deterministic invariants, injected-model LLM audit
 │   ├── stripper.ts        # Narrative stripping (code_and_math / balanced / strict)
+│   ├── memo.ts            # Supervisor memo builder (goal, solved items, critiques; bounded)
 │   └── tool-guard.ts      # Tool intent verification and reward-hacking blocks
 ├── test/
-│   └── audit.test.ts      # Unit tests (node:test, runs under Bun and Node)
+│   ├── audit.test.ts      # Auditor, tool-guard, and hook-layer tests (node:test, Bun and Node)
+│   └── memo.test.ts       # Memo builder tests (node:test, Bun and Node)
 ├── skills/
 │   └── reasoning-auditor/ # Standalone skill alternative (no middleware required)
 ├── openspec/              # OpenSpec change management (changes/, specs/, schemas/)
@@ -60,7 +66,7 @@ opencode-reasoning-audit/
 - **Framework**: `node:test` with `node:assert/strict` (no external assertion libraries). Runs under both `bun test` and Node 22+ (`node --test`).
 - **Naming**: behavior-descriptive test titles (e.g., `test('stripNarrative isolates code and math steps', ...)`).
 - **Location**: `test/*.test.ts`.
-- **Isolation**: mock session objects (`injectMessage`, `regenerate`) for lifecycle-hook tests; no network or filesystem dependencies.
+- **Isolation**: mock OpenCode clients (`session.create`, `session.prompt`, `session.promptAsync`, `session.abort`) and injected `invokeModel` functions for hook-layer tests; no network or filesystem dependencies.
 - **Coverage**: every new `src/` function gets at least one test covering observable behavior (constitution principle IV).
 
 ## Behavioral Rules
@@ -172,9 +178,10 @@ before writing or reviewing code.
 
 ## Architecture
 
-- **Middleware pattern**: `index.ts` exports the plugin default object with two OpenCode lifecycle hooks (`onMessageUpdated`, `onToolExecute`); all logic lives in pure `src/` modules.
-- **Audit pipeline**: strip narrative (`stripNarrative`) → peer audit (`runPeerAudit`: deterministic invariant checks first, then LLM verification) → repair loop (`injectMessage` + `regenerate`, bounded by `maxRegenerations` and the `is_audited` flag to prevent infinite loops).
-- **Tool guard**: `verifyToolIntent` blocks reward-hacking patterns and file paths absent from the verified reasoning trace before any tool executes.
-- **Config resolution**: `resolveAuditorConfig` applies session → env → default precedence so users can override the auditor model without code changes.
-- **Session state**: module-level Maps track verified steps and regeneration counts per session ID.
-- **Dual distribution**: the same audit behavior ships as middleware (`index.ts`) or a standalone skill (`skills/reasoning-auditor/skill.md`).
+- **Plugin pattern**: `index.ts` default-exports a `PluginModule` (`{ id, server }`); `server(input)` returns the hook map (`event`, `chat.message`, `tool.execute.before`, `tool.execute.after`, `experimental.chat.system.transform`); all logic lives in pure `src/` modules.
+- **Audit pipeline**: strip narrative (`stripNarrative`) → deterministic invariants → side-session peer audit (`runPeerAudit` with an injected `invokeModel`) → on failure, critique delivery: steer via `promptAsync` for `minor`, interrupt (`session.abort`) plus steer for `severe`, bounded by `maxRegenerations` per session; passed steps are recorded in a verified trace.
+- **Tool guard**: `verifyToolIntent` blocks reward-hacking patterns and file paths absent from the verified reasoning trace before any tool executes; an empty trace never blocks, and block reasons are actionable (the reason is the model's corrective signal).
+- **Supervisor memo**: `buildMemo` (`src/memo.ts`) formats the goal, recently solved items, and recent critiques into a bounded memo appended to the system prompt via the experimental transform hook; registration degrades gracefully when the hook is absent.
+- **Config resolution**: `resolveHookConfig` / `resolveAuditorConfig` apply session → env → default precedence so users can override the auditor model without code changes.
+- **Session state**: module-level Maps keyed by session ID track the goal, verified steps, critique count, solved items, and critique log; in-process only, cleared on dispose.
+- **Dual distribution**: the audit technique ships as middleware (`index.ts`) or a standalone skill (`skills/reasoning-auditor/skill.md`); the middleware adds steer/interrupt critique delivery, the tool guard, and the supervisor memo, which the skill cannot do.
