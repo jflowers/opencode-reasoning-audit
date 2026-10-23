@@ -57,11 +57,19 @@ environment variables, then defaults.
 - **WHEN** a step requires peer audit
 - **THEN** the model call happens in its own session and the
   supervised conversation contains only the steer critique, if any
-
 #### Scenario: Configuration precedence
+
 - **WHEN** the auditor model is set in the session plugin config
   and a different value is in the environment
 - **THEN** the session plugin config value is used
+
+[Amendment 2026-10-23, review finding #6: the session-plugin-config
+tier is unreachable at runtime — no public hook payload carries
+per-session plugin config (the `chat.params` input exposes session,
+agent, model, provider, and message only; verified against
+`@opencode-ai/plugin` 1.19.4). The scenario holds for the resolution
+function, unit-tested with a constructed session object; at runtime
+the effective chain is environment variables → defaults.]
 
 #### Scenario: Structured verdict
 - **WHEN** the peer audit returns
@@ -114,3 +122,8 @@ session and deliver the critique as a steering prompt.
 - **WHEN** a reasoning step contains a reward-hacking pattern
 - **THEN** the session is interrupted and the critique is
   delivered
+
+[Amendment 2026-10-23, review findings #2/#8: once the per-session
+maxRegenerations bound is spent, a severe finding neither interrupts
+nor delivers; it is recorded as withheld. The whole intervention
+(interrupt + steer) is bounded per session.]
