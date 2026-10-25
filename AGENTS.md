@@ -19,7 +19,7 @@ bun install
 bun test
 
 # Test (Node 22+)
-node --test test/audit.test.ts test/memo.test.ts
+node --test test/audit.test.ts test/memo.test.ts test/reminders.test.ts
 
 # Register the plugin with OpenCode (local development)
 # Either add "./index.ts" to the "plugin" array in opencode.json, or:
@@ -34,15 +34,17 @@ opencode plugin "$(pwd)"
 
 ```text
 opencode-supervisor/
-├── index.ts               # Plugin entry: Hooks API wiring (event, chat.message, tool.execute), pluginConfig
+├── index.ts               # Plugin entry: Hooks API wiring (event, chat.message, tool.execute, agent tools), pluginConfig
 ├── src/
 │   ├── auditor.ts         # Peer audit: config resolution, deterministic invariants, injected-model LLM audit
 │   ├── stripper.ts        # Narrative stripping (code_and_math / balanced / strict)
 │   ├── memo.ts            # Supervisor memo builder (goal, solved items, critiques; bounded)
+│   ├── reminders.ts       # Agent-console reminders: pure storage and memo rendering
 │   └── tool-guard.ts      # Tool intent verification and reward-hacking blocks
 ├── test/
 │   ├── audit.test.ts      # Auditor, tool-guard, and hook-layer tests (node:test, Bun and Node)
-│   └── memo.test.ts       # Memo builder tests (node:test, Bun and Node)
+│   ├── memo.test.ts       # Memo builder tests (node:test, Bun and Node)
+│   └── reminders.test.ts  # Reminder module, memo integration, and tool-layer tests (node:test, Bun and Node)
 ├── skills/
 │   └── reasoning-auditor/ # Standalone skill alternative (no middleware required)
 ├── openspec/              # OpenSpec change management (changes/, specs/, schemas/)
@@ -181,7 +183,8 @@ before writing or reviewing code.
 - **Plugin pattern**: `index.ts` default-exports a `PluginModule` (`{ id, server }`); `server(input)` returns the hook map (`event`, `chat.message`, `tool.execute.before`, `tool.execute.after`, `experimental.chat.system.transform`); all logic lives in pure `src/` modules.
 - **Audit pipeline**: strip narrative (`stripNarrative`) → deterministic invariants → side-session peer audit (`runPeerAudit` with an injected `invokeModel`) → on failure, critique delivery: steer via `promptAsync` for `minor`, interrupt (`session.abort`) plus steer for `severe`, bounded by `maxRegenerations` per session; passed steps are recorded in a verified trace.
 - **Tool guard**: `verifyToolIntent` blocks reward-hacking patterns and file paths absent from the verified reasoning trace before any tool executes; an empty trace never blocks, and block reasons are actionable (the reason is the model's corrective signal).
-- **Supervisor memo**: `buildMemo` (`src/memo.ts`) formats the goal, recently solved items, and recent critiques into a bounded memo appended to the system prompt via the experimental transform hook; registration degrades gracefully when the hook is absent.
+- **Supervisor memo**: `buildMemo` (`src/memo.ts`) formats the goal, reminders, recently solved items, and recent critiques into a bounded memo appended to the system prompt via the experimental transform hook; registration degrades gracefully when the hook is absent.
+- **Agent console**: the plugin registers `remind_me` / `forget_reminder` tools (`Hooks.tool`) backed by `src/reminders.ts`; reminders ride the memo each turn (surviving context compaction), tool results echo the stored text (surviving gateway memo drops), and side sessions get inert results.
 - **Config resolution**: `resolveHookConfig` / `resolveAuditorConfig` apply session → env → default precedence so users can override the auditor model without code changes.
 - **Session state**: module-level Maps keyed by session ID track the goal, verified steps, critique count, solved items, and critique log; in-process only, cleared on dispose.
 - **Dual distribution**: the audit technique ships as middleware (`index.ts`) or a standalone skill (`skills/reasoning-auditor/skill.md`); the middleware adds steer/interrupt critique delivery, the tool guard, and the supervisor memo, which the skill cannot do.

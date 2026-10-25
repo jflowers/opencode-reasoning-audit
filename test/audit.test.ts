@@ -350,6 +350,9 @@ test('plugin module imports cleanly and exports the PluginModule entry', async (
   assert.equal(typeof hooks['tool.execute.after'], 'function');
   assert.equal(typeof hooks['experimental.chat.system.transform'], 'function');
   assert.equal(typeof hooks.dispose, 'function');
+  // FR-020/FR-021: the agent console tools register alongside the hooks.
+  assert.equal(typeof hooks.tool?.remind_me?.execute, 'function');
+  assert.equal(typeof hooks.tool?.forget_reminder?.execute, 'function');
 });
 
 test('resolveHookConfig resolves hook knobs session → environment → defaults', () => {
@@ -362,6 +365,7 @@ test('resolveHookConfig resolves hook knobs session → environment → defaults
     'OPENCODE_SUPERVISOR_REQUIRE_STEP_REFERENCE_IN_TOOLS',
     'OPENCODE_SUPERVISOR_MEMO_MAX_SOLVED_ITEMS',
     'OPENCODE_SUPERVISOR_MEMO_MAX_CRITIQUES',
+    'OPENCODE_SUPERVISOR_MEMO_MAX_REMINDERS',
   ];
   const saved: Record<string, string | undefined> = {};
   for (const name of envNames) {
@@ -379,7 +383,7 @@ test('resolveHookConfig resolves hook knobs session → environment → defaults
             maxRegenerations: 5,
             blockRewardHacking: false,
             stripMode: 'strict',
-            memoLimits: { maxSolvedItems: 2, maxCritiques: 1 },
+            memoLimits: { maxSolvedItems: 2, maxCritiques: 1, maxReminders: 1 },
           },
         },
       },
@@ -388,19 +392,21 @@ test('resolveHookConfig resolves hook knobs session → environment → defaults
     assert.equal(fromSession.maxRegenerations, 5);
     assert.equal(fromSession.blockRewardHacking, false);
     assert.equal(fromSession.stripMode, 'strict');
-    assert.deepEqual(fromSession.memoLimits, { maxSolvedItems: 2, maxCritiques: 1 });
+    assert.deepEqual(fromSession.memoLimits, { maxSolvedItems: 2, maxCritiques: 1, maxReminders: 1 });
 
     // Environment applies when no session override exists.
     process.env.OPENCODE_SUPERVISOR_MAX_REGENERATIONS = '7';
     process.env.OPENCODE_SUPERVISOR_BLOCK_REWARD_HACKING = 'false';
     process.env.OPENCODE_SUPERVISOR_MEMO_MAX_SOLVED_ITEMS = '9';
     process.env.OPENCODE_SUPERVISOR_MEMO_MAX_CRITIQUES = '4';
+    process.env.OPENCODE_SUPERVISOR_MEMO_MAX_REMINDERS = '6';
     process.env.OPENCODE_SUPERVISOR_STRIP_MODE = 'balanced';
     const fromEnv = resolveHookConfig();
     assert.equal(fromEnv.maxRegenerations, 7);
     assert.equal(fromEnv.blockRewardHacking, false);
     assert.equal(fromEnv.memoLimits.maxSolvedItems, 9);
     assert.equal(fromEnv.memoLimits.maxCritiques, 4);
+    assert.equal(fromEnv.memoLimits.maxReminders, 6);
     assert.equal(fromEnv.stripMode, 'balanced');
 
     // pluginConfig defaults apply when nothing overrides them.
@@ -420,10 +426,12 @@ test('resolveHookConfig resolves hook knobs session → environment → defaults
     process.env.OPENCODE_SUPERVISOR_MAX_REGENERATIONS = 'not-a-number';
     process.env.OPENCODE_SUPERVISOR_STRIP_MODE = 'bogus';
     process.env.OPENCODE_SUPERVISOR_BLOCK_REWARD_HACKING = 'maybe';
+    process.env.OPENCODE_SUPERVISOR_MEMO_MAX_REMINDERS = 'not-a-number';
     const invalid = resolveHookConfig();
     assert.equal(invalid.maxRegenerations, 2);
     assert.equal(invalid.stripMode, 'code_and_math');
     assert.equal(invalid.blockRewardHacking, true);
+    assert.equal(invalid.memoLimits.maxReminders, DEFAULT_MEMO_LIMITS.maxReminders);
   } finally {
     for (const name of envNames) {
       const value = saved[name];
@@ -628,6 +636,7 @@ const AUDIT_ENV_NAMES = [
   'OPENCODE_SUPERVISOR_REQUIRE_STEP_REFERENCE_IN_TOOLS',
   'OPENCODE_SUPERVISOR_MEMO_MAX_SOLVED_ITEMS',
   'OPENCODE_SUPERVISOR_MEMO_MAX_CRITIQUES',
+  'OPENCODE_SUPERVISOR_MEMO_MAX_REMINDERS',
 ];
 
 /** Saves/deletes the auditor env knobs around `run`, restoring after. */
