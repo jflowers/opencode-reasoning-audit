@@ -62,6 +62,9 @@
   tree, test command file list, and enumerations; package.json
   version 2.2.0 and test:node file list. Verify: grep for stale
   enumerations returns nothing new.
+  Review round 1 amendment: the README 7.1 node --test command was
+  missed by the sweep (still listed three test files); fixed during
+  review-council round 1.
 
 ## 5. Publication
 
@@ -84,3 +87,7 @@
   channel and state layer.
 - Advisory issues #9 and #13 stay fast-follow; nothing here resolves
   them.
+- Review round 1 follow-ups filed: blog #16 (2.2.0 engineer console),
+  tutorial scope extension on #4 (engineer-console section), deferred
+  advisories #17 (normalizer/parser DRY, shared path matcher, trigger
+  glob precompilation, extractor dedup, read-time count cap).

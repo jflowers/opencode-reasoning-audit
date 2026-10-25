@@ -22,6 +22,8 @@
  * (spike 1.4 — file-source plugins must carry `id`).
  */
 
+import fs from 'node:fs';
+import path from 'node:path';
 import { tool, type Hooks, type PluginInput, type PluginModule, type PluginOptions } from '@opencode-ai/plugin';
 import {
   resolveAuditorConfig,
@@ -31,7 +33,7 @@ import {
   type InvokeModel,
 } from './src/auditor.ts';
 import { stripNarrative } from './src/stripper.ts';
-import { extractArgPaths, verifyToolIntent, type ToolVerificationResult } from './src/tool-guard.ts';
+import { verifyToolIntent, type ToolVerificationResult } from './src/tool-guard.ts';
 import { buildMemo, DEFAULT_MEMO_LIMITS, type CritiqueRecord, type MemoLimits, type SolvedItem } from './src/memo.ts';
 import {
   addReminder,
@@ -42,6 +44,7 @@ import {
 import {
   activeDirectives,
   compileEnforcement,
+  extractPolicyPaths,
   matchTriggers,
   MAX_DIRECTIVES,
   parseDirectives,
@@ -49,8 +52,6 @@ import {
   renderDirectivesAdvisory,
   type Directive,
 } from './src/directives.ts';
-import fs from 'node:fs';
-import path from 'node:path';
 
 // ── Configuration (session plugin config → environment → defaults) ──
 
@@ -790,25 +791,48 @@ function registerSystemTransform(hooks: Hooks, handler: SystemTransformHandler):
 /**
  * Loads directive files (FR-026) from
  * `<directory>/.opencode/supervisor/directives/*.md`, sorted by
- * filename for deterministic precedence. A missing or unreadable
- * directory yields no files (fail-open, FR-032) — directive-less
- * projects keep 2.1.0 behavior. I/O lives here in the hook layer
- * (design D3); parsing is pure in src/directives.ts.
+ * filename for deterministic precedence. A missing directory yields
+ * no files silently — directive-less projects keep 2.1.0 behavior —
+ * while an unreadable directory or file logs a warning and is
+ * skipped (fail-open, FR-032; review round 1: a blanket catch hid
+ * per-file failures and dropped the whole set). I/O lives here in
+ * the hook layer (design D3); parsing is pure in src/directives.ts.
  */
 const loadDirectiveFiles = (directory: string): { name: string; content: string }[] => {
+  const directivesDir = path.join(directory, '.opencode', 'supervisor', 'directives');
+  let entries;
   try {
-    const directivesDir = path.join(directory, '.opencode', 'supervisor', 'directives');
-    return fs
-      .readdirSync(directivesDir, { withFileTypes: true })
-      .filter((entry) => entry.isFile() && entry.name.endsWith('.md'))
-      .sort((a, b) => a.name.localeCompare(b.name))
-      .map((entry) => ({
-        name: entry.name,
-        content: fs.readFileSync(path.join(directivesDir, entry.name), 'utf8'),
-      }));
-  } catch {
+    entries = fs.readdirSync(directivesDir, { withFileTypes: true });
+  } catch (error) {
+    // ENOENT = no directives configured (expected, stays silent);
+    // anything else is a real read problem worth surfacing.
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      console.warn(
+        `[supervisor] directive directory unreadable (${errorText(error)}); no file directives loaded`
+      );
+    }
     return [];
   }
+  // Codepoint sort (review round 1): localeCompare depends on the
+  // ambient locale, which made memo order and cap survival
+  // nondeterministic across environments (FR-026 determinism).
+  const sorted = entries
+    .filter((entry) => entry.isFile() && entry.name.endsWith('.md'))
+    .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  const files: { name: string; content: string }[] = [];
+  for (const entry of sorted) {
+    try {
+      files.push({
+        name: entry.name,
+        content: fs.readFileSync(path.join(directivesDir, entry.name), 'utf8'),
+      });
+    } catch (error) {
+      console.warn(
+        `[supervisor] directive file '${entry.name}' unreadable (${errorText(error)}); skipped`
+      );
+    }
+  }
+  return files;
 };
 
 /**
@@ -1036,9 +1060,13 @@ const server = async (input: PluginInput, options?: PluginOptions): Promise<Hook
         // attempt itself is signal; recording happens before the
         // guard decision so neither path loses it.
         const state = sessionState.get(hookInput.sessionID);
-        for (const id of matchTriggers(directives, hookInput.tool, extractArgPaths(output.args))) {
+        for (const id of matchTriggers(directives, hookInput.tool, extractPolicyPaths(output.args))) {
           if (!state.triggeredDirectives.includes(id)) {
             state.triggeredDirectives.push(id);
+            // Design III observability (review round 1): triggers are
+            // logged like blocks — the engineer sees when policy
+            // surfaced without watching the memo.
+            console.log(`[supervisor] directive '${id}' triggered by tool '${hookInput.tool}'`);
           }
         }
         verification = verifyToolIntent(

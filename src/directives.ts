@@ -61,7 +61,7 @@ export const MAX_DIRECTIVE_TEXT = 1000;
 export const MAX_RULES_PER_DIRECTIVE = 10;
 export const MAX_DIRECTIVES_RENDER_BUDGET = 4000;
 
-const FENCE_PATTERN = /```supervisor\n([\s\S]*?)```/;
+const FENCE_PATTERN = /```supervisor\r?\n([\s\S]*?)```/;
 
 export interface DirectiveFile {
   name: string;
@@ -157,17 +157,34 @@ export const parseDirectives = (files: DirectiveFile[]): ParseDirectivesResult =
     let rawRules: RawRules = {};
     const fence = file.content.match(FENCE_PATTERN);
     if (fence) {
+      let parsed: unknown;
       try {
-        rawRules = JSON.parse(fence[1]) as RawRules;
+        parsed = JSON.parse(fence[1]);
       } catch {
         warnings.push(
           `directive file '${file.name}' has a malformed supervisor rules block; file skipped`
         );
         continue;
       }
+      // JSON.parse accepts `null`, arrays, and scalars — only an
+      // object can carry rules (review round 1: a `null` fence threw
+      // out of server() and broke plugin load, violating FR-032).
+      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+        warnings.push(
+          `directive file '${file.name}' supervisor rules block is not a JSON object; file skipped`
+        );
+        continue;
+      }
+      rawRules = parsed as RawRules;
       text = file.content.replace(FENCE_PATTERN, '');
     }
-    const trimmed = text.trim().slice(0, MAX_DIRECTIVE_TEXT);
+    const trimmedText = text.trim();
+    if (trimmedText.length > MAX_DIRECTIVE_TEXT) {
+      warnings.push(
+        `directive '${id}' advisory text truncated from ${trimmedText.length} to ${MAX_DIRECTIVE_TEXT} characters`
+      );
+    }
+    const trimmed = trimmedText.slice(0, MAX_DIRECTIVE_TEXT);
     const enforce = normalizeEnforcementRules(rawRules.enforce);
     const when = normalizeTriggerRules(rawRules.when);
     if (enforce.dropped > 0) {
@@ -220,8 +237,13 @@ export const parseOptionsDirectives = (raw: unknown): ParseDirectivesResult => {
       typeof record.id === 'string' && record.id.trim().length > 0
         ? record.id.trim()
         : `d${index + 1}`;
-    const text =
-      typeof record.text === 'string' ? record.text.trim().slice(0, MAX_DIRECTIVE_TEXT) : '';
+    const rawText = typeof record.text === 'string' ? record.text.trim() : '';
+    if (rawText.length > MAX_DIRECTIVE_TEXT) {
+      warnings.push(
+        `directive '${id}' advisory text truncated from ${rawText.length} to ${MAX_DIRECTIVE_TEXT} characters`
+      );
+    }
+    const text = rawText.slice(0, MAX_DIRECTIVE_TEXT);
     const enforce = normalizeEnforcementRules(record.enforce);
     const when = normalizeTriggerRules(record.when);
     if (enforce.dropped > 0) {
@@ -252,8 +274,15 @@ export const parseOptionsDirectives = (raw: unknown): ParseDirectivesResult => {
  * Compile a glob to an anchored RegExp (design D4): a `**` segment
  * (optionally slash-terminated) matches zero or more path segments,
  * a bare `**` matches anything including slashes, and `*` and `?`
- * stay within one segment. Everything else is literal. Never
- * throws.
+ * stay within one segment. Everything else is literal. A double-star
+ * segment followed by a slash is
+ * translated to segment-anchored chunks (a non-slash run followed by
+ * a slash, repeated) so repeated
+ * glob segments stay near-linear on long non-matching paths (review
+ * round 1: dot-star chunks backtracked combinatorially on the guard
+ * hot path). Matching is case-insensitive, matching the guard's
+ * trace-check convention — path case is not a reliable policy signal
+ * on macOS or Windows filesystems. Never throws.
  */
 export const globToRegExp = (glob: string): RegExp => {
   let source = '^';
@@ -262,7 +291,7 @@ export const globToRegExp = (glob: string): RegExp => {
     if (c === '*') {
       if (glob[i + 1] === '*') {
         if (glob[i + 2] === '/') {
-          source += '(?:.*/)?';
+          source += '(?:[^/]*/)*';
           i += 2;
         } else {
           source += '.*';
@@ -277,8 +306,32 @@ export const globToRegExp = (glob: string): RegExp => {
       source += c.replace(/[.\+^${}()|\[\]\\]/g, '\\$&');
     }
   }
-  return new RegExp(`${source}$`);
+  return new RegExp(`${source}$`, 'i');
 };
+
+/**
+ * Path-candidate pattern for directive matching (FR-028, FR-029):
+ * slash-containing path tokens (optionally absolute) plus bare
+ * dotfile names. Deliberately broader than the trace check's
+ * source-extension extractor — a forbidPath glob must see `.env`,
+ * `secrets/credentials.pem`, and extensionless paths the extension
+ * allowlist would miss (review round 1). Over-extraction is safe:
+ * candidates only matter when a directive glob still has to match.
+ */
+const POLICY_PATH_PATTERN =
+  /\/?[A-Za-z0-9_.\-~@]+\/[A-Za-z0-9_.\-~@/]*|\.[A-Za-z0-9][A-Za-z0-9_.\-]*/g;
+
+/**
+ * Extracts policy-relevant path candidates from tool arguments
+ * (FR-028, FR-029): top-level string values scanned for path-like
+ * tokens. Feeds enforcement matching and trigger recording; the
+ * trace check keeps its own source-extension extractor (FR-010).
+ */
+export function extractPolicyPaths(args: Record<string, unknown> | undefined): string[] {
+  return Object.values(args || {})
+    .filter((v): v is string => typeof v === 'string')
+    .flatMap((v) => v.match(POLICY_PATH_PATTERN) || []);
+}
 
 /**
  * Compile enforcement rules for the tool guard (FR-028). Invalid
@@ -327,8 +380,9 @@ export interface EnforcementVerdict {
 
 /**
  * Evaluate compiled enforcement against a tool call (FR-028).
- * Paths match on the full path or the basename; patterns match the
- * raw serialized arguments, case-insensitively. An empty rule set
+ * Paths match case-insensitively on the full path or the basename;
+ * patterns match the raw serialized arguments, case-insensitively.
+ * An empty rule set
  * never blocks. Block reasons name the directive, the match, and
  * the advisory text so the model can correct course (FR-012).
  */
@@ -367,9 +421,9 @@ export const evaluateEnforcement = (
 /**
  * Return the ids of directives whose `when` rules match the tool
  * call (FR-029): tool names compare case-insensitively; path globs
- * match any extracted argument path on the full path or basename.
- * Directives without `when` rules never trigger here — they are
- * always active.
+ * match any extracted argument path on the full path or basename,
+ * case-insensitively. Directives without `when` rules never trigger
+ * here — they are always active.
  */
 export const matchTriggers = (
   directives: Directive[],
