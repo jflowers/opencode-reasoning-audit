@@ -1,0 +1,66 @@
+# Tasks
+
+## 1. Code rename (no behavior change)
+
+- [ ] 1.1 [P] Rename in `index.ts`: plugin id and config key →
+  `opencode-supervisor`, `PLUGIN_VERSION` → `2.0.0`,
+  `[reasoning-audit]` prefixes → `[supervisor]`, side-session
+  title, and the six `OPENCODE_AUDITOR_*` env vars →
+  `OPENCODE_SUPERVISOR_*` (FR-018, FR-019). Verify: `bun test`
+  green after the matching test rename in 1.3.
+- [ ] 1.2 [P] Rename in `src/auditor.ts`:
+  `OPENCODE_AUDITOR_MODEL` / `OPENCODE_AUDITOR_VARIANT` →
+  `OPENCODE_SUPERVISOR_MODEL` / `OPENCODE_SUPERVISOR_VARIANT`
+  (FR-019). Verify: auditor unit tests green under `bun test`.
+- [ ] 1.3 [P] Update `test/audit.test.ts` references (env var
+  names, prefixes, expectations) to the renamed surface. Verify:
+  no test asserts the old names; suite green.
+
+## 2. Package and documentation
+
+- [ ] 2.1 [P] Update `package.json`: name
+  `opencode-supervisor`, description and keywords for the
+  supervision identity. Verify: `bun install` leaves lockfile
+  consistent; `bun test` still runs.
+- [ ] 2.2 [P] Rewrite `README.md` around the supervision identity:
+  lead with the supervision plane, the VentureBeat article as the
+  origin of the audit module, renamed config tables, and a 1.x →
+  2.x migration table for env vars. Verify: every documented env
+  var matches the code; no stale repo URLs.
+- [ ] 2.3 [P] Update `AGENTS.md` project overview and structure
+  for the new name. Verify: overview matches the repo identity.
+- [ ] 2.4 [P] Add the `CHANGELOG.md` 2.0.0 entry: rename, breaking
+  env-var cut with the full old→new list, repo rename note.
+  Verify: entry lists all eight renamed variables.
+- [ ] 2.5 [P] Update `skills/reasoning-auditor/skill.md`
+  cross-references to the middleware and repo (skill name
+  unchanged, design D5). Verify: skill references resolve to the
+  new identity.
+
+## 3. Verification
+
+- [ ] 3.1 Run both runtimes green: `bun test` and
+  `node --test test/` exit zero (CI parity per AGENTS.md).
+- [ ] 3.2 Grep gate: zero live matches for
+  `OPENCODE_AUDITOR` / `reasoning-audit` outside historical
+  artifacts (`openspec/changes/audit-supervisor/`, `.uf/`,
+  CHANGELOG history). Verify: grep output is empty after
+  exclusions.
+
+## 4. Repo rename and publication
+
+- [ ] 4.1 Rename the GitHub repo (`gh repo rename
+  opencode-supervisor`), update the local `origin` URL. Verify:
+  `git push --dry-run` and `gh repo view` address the new name.
+- [ ] 4.2 File the documentation issue for this user-facing
+  change before merge (AGENTS.md documentation gate).
+- [ ] 4.3 Run `/uf.review-council` and resolve all REQUEST
+  CHANGES before PR (AGENTS.md review mandate).
+- [ ] 4.4 Open the PR from `opsx/rebrand-supervisor` to `main`;
+  archive the change via the opsx archive workflow after merge.
+
+## Workflow follow-up
+
+- Changes B (`agent-reminders`), C (`engineer-directives`), and D
+  (`supervisor-tools`) build on this rename and start only after
+  this PR merges.
