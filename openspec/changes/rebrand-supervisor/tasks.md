@@ -68,7 +68,7 @@
   code-level advisories tracked in #9, stale-issue sweep
   recorded below. divisor-adversary infra-failed both rounds
   (opus endpoint down, 0 findings).
-- [ ] 4.4 Open the PR from `opsx/rebrand-supervisor` to `main`;
+- [x] 4.4 Open the PR from `opsx/rebrand-supervisor` to `main`;
   archive the change via the opsx archive workflow after merge.
 
 ## Workflow follow-up
