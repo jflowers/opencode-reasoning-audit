@@ -65,9 +65,11 @@
 
 ## 5. Publication
 
-- [ ] 5.1 File the documentation issues: this repo (label
+- [x] 5.1 File the documentation issues: this repo (label
   documentation) and unbound-force/website cross-repo. Record both
   issue numbers in this file. Verify: gh issue view shows both.
+  Filed: jflowers/opencode-supervisor#15 and
+  unbound-force/website#328.
 - [ ] 5.2 Run /uf.review-council and resolve every REQUEST CHANGES.
   Record the verdict and iteration count here. Verify: consolidated
   verdict is APPROVE or APPROVE WITH ADVISORIES.
