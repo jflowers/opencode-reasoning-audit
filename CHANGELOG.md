@@ -3,6 +3,55 @@
 All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [2.3.0] - 2026-10-25
+
+Spec deltas:
+`openspec/changes/supervisor-tools/specs/supervisor-tools/spec.md`.
+
+### Added
+
+- `supervisor-tools` capability spec (FR-033..FR-042): the agent
+  console's second slice — recall, report, and on-demand audit.
+- `recall` tool (FR-033): reads the full retained supervision state
+  (`goal`, `reminders`, `solved`, `critiques`, or `all`), beyond the
+  memo's recency caps; read-only, with actionable listings for
+  unsupported section names.
+- `report` tool (FR-034): records a self-reported event as one of four
+  kinds (`blocker`, `deviation`, `outcome`, `note`) with reminder-grade
+  text hygiene (whitespace rejection, 2000-character truncation) and an
+  echoing tool result.
+- Report storage bounds (FR-035): the most recent
+  `memoLimits.maxReports` reports are kept (default 5;
+  `OPENCODE_SUPERVISOR_MEMO_MAX_REPORTS`).
+- `Agent reports:` memo section (FR-036) rendered between solved items
+  and critiques, omitted when empty.
+- `request_audit` tool (FR-037): runs a stated focus through the same
+  pipeline as reasoning steps (narrative stripping, deterministic
+  invariants, side-session peer audit); whitespace-only or
+  narrative-only focus is rejected without invoking the audit.
+- On-demand audit delivery (FR-038): failed audits return the critique
+  in the tool result only — no steer, no interrupt, no regeneration
+  budget consumption; passed focus joins the verified trace.
+- On-demand audit bound (FR-039): `maxOnDemandAudits` per session
+  (default 8; `OPENCODE_SUPERVISOR_MAX_ON_DEMAND_AUDITS`); the
+  automatic audit loop is unaffected.
+- Console-tool hardening (FR-040, FR-041): side sessions get inert
+  results; malformed arguments yield actionable results, never thrown
+  errors.
+- Trust boundary (FR-042): self-reported report text is recorded and
+  surfaced only — it never enters peer-audit prompts.
+
+### Changed
+
+- Storage is decoupled from render (design D3): solved-items and
+  critique-log storage is bounded by retention constants (50 solved
+  items, 30 critiques) instead of the memo render caps, so recall
+  reaches further than the memo shows; memo output is unchanged.
+- `MemoLimits` gained a required `maxReports` field (default 5) —
+  code constructing `MemoLimits` literals must add it.
+
+32 new tests (182 total) pass under Bun and Node 22+.
+
 ## [2.2.0] - 2026-10-25
 
 Spec deltas:

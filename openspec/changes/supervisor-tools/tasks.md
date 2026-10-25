@@ -66,7 +66,7 @@
 
 ## 5. Documentation and review
 
-- [ ] 5.1 Update README (§5.1 hook map + tool list, §5.4 module table
+- [x] 5.1 Update README (§5.1 hook map + tool list, §5.4 module table
   with src/console.ts, §7.1 test command gains test/console.test.ts,
   §7.4 agent-console section for the three new tools, §9 bounds, §10
   roadmap mark shipped), AGENTS.md (overview, structure, architecture,
@@ -90,8 +90,12 @@
 
 - Archive the change after the PR merges (opsx archive workflow).
 - Extend the tutorial issue #4 with the new console tools (recall,
-  report, request_audit) as scope for the walkthrough.
+  report, request_audit) as scope for the walkthrough. Done: scope
+  comment posted on #4 (issuecomment-6405060027).
 - File a blog-issue follow-up for the 2.3.0 agent-console completion
-  if the doc-gate pattern calls for one.
+  if the doc-gate pattern calls for one. Done: #21 (label blog).
+- Documentation issues filed: verification #20 (in repo, post-merge
+  checklist), blog #21, tutorial scope comment on #4, website
+  capabilities update unbound-force/website#330.
 - Future change: engineer-directive rule kinds (approve-gates, required
   reviewers) remain on the roadmap (README §10).
