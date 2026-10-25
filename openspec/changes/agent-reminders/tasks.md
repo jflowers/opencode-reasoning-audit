@@ -55,7 +55,7 @@
   `unbound-force/website` (constitution cross-repo documentation
   rule). Filed: #11 (this repo, label documentation) and
   unbound-force/website#327.
-- [ ] 5.2 Run `/uf.review-council` and resolve all REQUEST CHANGES
+- [x] 5.2 Run `/uf.review-council` and resolve all REQUEST CHANGES
   before PR (AGENTS.md review mandate). Round 1 verdict: APPROVE WITH
   ADVISORIES (architect/curator/guard/sre all approved; adversary
   infra-failed — opus endpoint down, 0 findings, excluded per
