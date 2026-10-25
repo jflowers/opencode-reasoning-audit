@@ -1,5 +1,5 @@
 /**
- * opencode-reasoning-audit — OpenCode Process Supervision hook layer
+ * opencode-supervisor — OpenCode Process Supervision hook layer
  *
  * Thin `@opencode-ai/plugin` module (design D1): `server(input)` returns
  * hooks that observe completed reasoning parts (`event`), capture the
@@ -33,13 +33,13 @@ import { buildMemo, DEFAULT_MEMO_LIMITS, type CritiqueRecord, type MemoLimits, t
 
 // ── Configuration (session plugin config → environment → defaults) ──
 
-/** Environment names for the hook-layer knobs, following the OPENCODE_AUDITOR_* convention. */
-const ENV_MAX_REGENERATIONS = 'OPENCODE_AUDITOR_MAX_REGENERATIONS';
-const ENV_STRIP_MODE = 'OPENCODE_AUDITOR_STRIP_MODE';
-const ENV_BLOCK_REWARD_HACKING = 'OPENCODE_AUDITOR_BLOCK_REWARD_HACKING';
-const ENV_REQUIRE_STEP_REFERENCE = 'OPENCODE_AUDITOR_REQUIRE_STEP_REFERENCE_IN_TOOLS';
-const ENV_MEMO_MAX_SOLVED_ITEMS = 'OPENCODE_AUDITOR_MEMO_MAX_SOLVED_ITEMS';
-const ENV_MEMO_MAX_CRITIQUES = 'OPENCODE_AUDITOR_MEMO_MAX_CRITIQUES';
+/** Environment names for the hook-layer knobs, following the OPENCODE_SUPERVISOR_* convention. */
+const ENV_MAX_REGENERATIONS = 'OPENCODE_SUPERVISOR_MAX_REGENERATIONS';
+const ENV_STRIP_MODE = 'OPENCODE_SUPERVISOR_STRIP_MODE';
+const ENV_BLOCK_REWARD_HACKING = 'OPENCODE_SUPERVISOR_BLOCK_REWARD_HACKING';
+const ENV_REQUIRE_STEP_REFERENCE = 'OPENCODE_SUPERVISOR_REQUIRE_STEP_REFERENCE_IN_TOOLS';
+const ENV_MEMO_MAX_SOLVED_ITEMS = 'OPENCODE_SUPERVISOR_MEMO_MAX_SOLVED_ITEMS';
+const ENV_MEMO_MAX_CRITIQUES = 'OPENCODE_SUPERVISOR_MEMO_MAX_CRITIQUES';
 
 /**
  * Hook-layer configuration: the auditor's `AuditConfig` plus the memo
@@ -53,10 +53,10 @@ export interface HookConfig extends AuditConfig {
 
 /**
  * Plugin defaults — the lowest precedence tier. Model/variant defaults
- * are preserved from the v0 middleware; `OPENCODE_AUDITOR_MODEL` /
- * `OPENCODE_AUDITOR_VARIANT` remain the model overrides (applied by
- * `resolveAuditorConfig`). The v0 `OPENCODE_AUDITOR_ENDPOINT` HTTP
- * fallback is gone: audits run only through the side session (D2).
+ * are preserved from the v0 middleware; `OPENCODE_SUPERVISOR_MODEL` /
+ * `OPENCODE_SUPERVISOR_VARIANT` remain the model overrides (applied by
+ * `resolveAuditorConfig`). The v0 HTTP-endpoint auditor fallback is
+ * gone: audits run only through the side session (D2).
  */
 export const pluginConfig: HookConfig = {
   auditorModel: 'google/gemini-3.8-flash',
@@ -74,13 +74,13 @@ export const pluginConfig: HookConfig = {
  * build. `package.json` cannot be imported from here without a build
  * step, so the constant is the source of truth for the log prefix.
  */
-const PLUGIN_VERSION = '1.0.0';
+const PLUGIN_VERSION = '2.0.0';
 
 /** Emits the module-identity log line once per process (plugin load = first `server()` invocation, spike 1.4). */
 let identityLogged = false;
 
 /** Session shape carrying plugin config overrides — the same key `resolveAuditorConfig` reads, so one override object governs the whole plugin. */
-const PLUGIN_CONFIG_KEY = 'opencode-reasoning-audit';
+const PLUGIN_CONFIG_KEY = 'opencode-supervisor';
 
 interface SessionWithPluginConfig {
   config?: { plugins?: Record<string, unknown> };
@@ -470,7 +470,7 @@ function extractResponseText(parts: readonly SessionPromptPart[] | undefined): s
  * iteration 2, HIGH; see `auditorSessionIds`). The side session is
  * deleted on EVERY exit path (review finding #10, widened to the
  * failure paths by review iteration 2): it is ephemeral scaffolding,
- * and without deletion N persistent `reasoning-audit @ ...` sessions
+ * and without deletion N persistent `supervisor-audit @ ...` sessions
  * accumulate per audit — including failed audits, which in the
  * designed degradation mode (unauthenticated auditor) is every
  * audit. Deletion runs fail-open in its own try/catch — a delete
@@ -490,7 +490,7 @@ export function createInvokeModel(client: PluginInput['client'], directory: stri
     }
     const created = await client.session.create({
       body: {
-        title: `reasoning-audit @ ${config.auditorModel} (${config.auditorVariant})`,
+        title: `supervisor-audit @ ${config.auditorModel} (${config.auditorVariant})`,
       },
       query: { directory },
     });
@@ -510,10 +510,10 @@ export function createInvokeModel(client: PluginInput['client'], directory: stri
       try {
         const deleted = await client.session.delete({ path: { id: auditorSessionID } });
         if (deleted.error !== undefined && deleted.error !== null) {
-          console.error(`[reasoning-audit] ${responseFailure('auditor side session delete failed', deleted)}`);
+          console.error(`[supervisor] ${responseFailure('auditor side session delete failed', deleted)}`);
         }
       } catch (error) {
-        console.error(`[reasoning-audit] auditor side session delete failed open: ${errorText(error)}`);
+        console.error(`[supervisor] auditor side session delete failed open: ${errorText(error)}`);
       }
     };
     try {
@@ -587,7 +587,7 @@ interface CritiqueDeliveryRequest {
  * @returns The text of the delivered synthetic user part.
  */
 function critiqueMessage(critique: string): string {
-  return `[reasoning-audit] audit finding — correct the failed step and continue:\n${critique}`;
+  return `[supervisor] audit finding — correct the failed step and continue:\n${critique}`;
 }
 
 /**
@@ -652,7 +652,7 @@ function createCritiqueDelivery(client: PluginInput['client']): (request: Critiq
     if (state.critiqueCount >= config.maxRegenerations) {
       appendBounded(state.critiqueLog, { text: critique, severity, delivered: false }, config.memoLimits.maxCritiques);
       console.warn(
-        `[reasoning-audit] critique bound (${config.maxRegenerations}) reached for session ${sessionID}; ` +
+        `[supervisor] critique bound (${config.maxRegenerations}) reached for session ${sessionID}; ` +
           'critique recorded without delivery'
       );
       return;
@@ -676,10 +676,10 @@ function createCritiqueDelivery(client: PluginInput['client']): (request: Critiq
         if (aborted.error !== undefined && aborted.error !== null) {
           // In-band HTTP error (the SDK resolves these rather than
           // rejecting); fail open — the delivery below is still attempted.
-          console.error(`[reasoning-audit] ${responseFailure('session abort failed', aborted)}`);
+          console.error(`[supervisor] ${responseFailure('session abort failed', aborted)}`);
         }
       } catch (error) {
-        console.error(`[reasoning-audit] session abort failed open: ${errorText(error)}`);
+        console.error(`[supervisor] session abort failed open: ${errorText(error)}`);
       }
     }
     try {
@@ -707,7 +707,7 @@ function createCritiqueDelivery(client: PluginInput['client']): (request: Critiq
         state.critiqueCount -= 1;
       }
       appendBounded(state.critiqueLog, { text: critique, severity, delivered: false }, config.memoLimits.maxCritiques);
-      console.error(`[reasoning-audit] critique delivery failed open: ${errorText(error)}`);
+      console.error(`[supervisor] critique delivery failed open: ${errorText(error)}`);
     }
   };
 }
@@ -779,12 +779,12 @@ const server = async (input: PluginInput): Promise<Hooks> => {
     identityLogged = true;
     // Review iteration 2 (LOW): log the EFFECTIVE auditor, not the
     // pluginConfig default — resolveHookConfig() applies the
-    // environment tier (OPENCODE_AUDITOR_MODEL / _VARIANT) at the
+    // environment tier (OPENCODE_SUPERVISOR_MODEL / _VARIANT) at the
     // moment the line prints, so an operator with env overrides sees
     // the model actually in use.
     const loaded = resolveHookConfig();
     console.log(
-      `[reasoning-audit] v${PLUGIN_VERSION} loaded (auditor: ${loaded.auditorModel}, variant: ${loaded.auditorVariant})`
+      `[supervisor] v${PLUGIN_VERSION} loaded (auditor: ${loaded.auditorModel}, variant: ${loaded.auditorVariant})`
     );
   }
   // D2 adapter (task 3.2): the live audit path's invokeModel, bound
@@ -861,7 +861,7 @@ const server = async (input: PluginInput): Promise<Hooks> => {
           // so a degraded auditor never fences the session's tools.
           state.verifiedSteps.push(stepText);
           if (outcome.error !== undefined) {
-            console.warn('[reasoning-audit] peer audit failed open; step recorded as passed:', outcome.error);
+            console.warn('[supervisor] peer audit failed open; step recorded as passed:', outcome.error);
           }
         } else {
           // Task 3.3 — critique delivery (FR-007/FR-008; spike 1.2). The
@@ -878,7 +878,7 @@ const server = async (input: PluginInput): Promise<Hooks> => {
           });
         }
       } catch (error) {
-        console.error('[reasoning-audit] event hook failed:', errorText(error));
+        console.error('[supervisor] event hook failed:', errorText(error));
       }
     },
 
@@ -913,7 +913,7 @@ const server = async (input: PluginInput): Promise<Hooks> => {
         }
         state.goal = text;
       } catch (error) {
-        console.error('[reasoning-audit] chat.message hook failed open:', errorText(error));
+        console.error('[supervisor] chat.message hook failed open:', errorText(error));
       }
     },
 
@@ -948,14 +948,14 @@ const server = async (input: PluginInput): Promise<Hooks> => {
         );
       } catch (error) {
         // Fail-open (FR-005): guard infrastructure must not break the session.
-        console.error('[reasoning-audit] tool guard failed open:', errorText(error));
+        console.error('[supervisor] tool guard failed open:', errorText(error));
         return;
       }
       if (!verification.allowed) {
         // Spike 1.3: the plugin host does not log trigger failures, so
         // the plugin logs each block itself — the reason is the
         // model's only corrective signal (FR-012).
-        console.error(`[reasoning-audit] blocked tool '${hookInput.tool}': ${verification.reason}`);
+        console.error(`[supervisor] blocked tool '${hookInput.tool}': ${verification.reason}`);
         throw new Error(`Execution blocked: ${verification.reason}`);
       }
     },
@@ -984,7 +984,7 @@ const server = async (input: PluginInput): Promise<Hooks> => {
           resolveHookConfig().memoLimits.maxSolvedItems
         );
       } catch (error) {
-        console.error('[reasoning-audit] tool.execute.after hook failed open:', errorText(error));
+        console.error('[supervisor] tool.execute.after hook failed open:', errorText(error));
       }
     },
 
@@ -1035,7 +1035,7 @@ const server = async (input: PluginInput): Promise<Hooks> => {
         output.system.push(memo);
       }
     } catch (error) {
-      console.error('[reasoning-audit] system transform failed open:', errorText(error));
+      console.error('[supervisor] system transform failed open:', errorText(error));
     }
   };
   registerSystemTransform(hooks, systemTransform);
@@ -1044,6 +1044,6 @@ const server = async (input: PluginInput): Promise<Hooks> => {
 };
 
 /** OpenCode plugin module (spike 1.4: file-source plugins must carry `id`). The id matches `PLUGIN_CONFIG_KEY` so a user discovering the registered plugin id can use it as the session-config key (review finding #5). */
-export const plugin = { id: 'opencode-reasoning-audit', server } satisfies PluginModule;
+export const plugin = { id: 'opencode-supervisor', server } satisfies PluginModule;
 
 export default plugin;

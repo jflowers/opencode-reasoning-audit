@@ -47,21 +47,21 @@ export interface PeerAuditOutcome {
 
 /**
  * Resolves effective auditor model slug & variant with precedence:
- * 1. Session-level opencode.json plugin overrides (session.config.plugins['opencode-reasoning-audit'])
- * 2. Environment variables (OPENCODE_AUDITOR_MODEL, OPENCODE_AUDITOR_VARIANT)
+ * 1. Session-level opencode.json plugin overrides (session.config.plugins['opencode-supervisor'])
+ * 2. Environment variables (OPENCODE_SUPERVISOR_MODEL, OPENCODE_SUPERVISOR_VARIANT)
  * 3. Default pluginConfig in index.ts
  */
 export function resolveAuditorConfig(base: AuditConfig, session?: any): AuditConfig {
-  const sessionPluginCfg = session?.config?.plugins?.['opencode-reasoning-audit'] || {};
+  const sessionPluginCfg = session?.config?.plugins?.['opencode-supervisor'] || {};
   return {
     ...base,
     auditorModel:
       sessionPluginCfg.auditorModel ||
-      (typeof process !== 'undefined' ? process.env?.OPENCODE_AUDITOR_MODEL : undefined) ||
+      (typeof process !== 'undefined' ? process.env?.OPENCODE_SUPERVISOR_MODEL : undefined) ||
       base.auditorModel,
     auditorVariant:
       sessionPluginCfg.auditorVariant ||
-      (typeof process !== 'undefined' ? (process.env?.OPENCODE_AUDITOR_VARIANT as AuditorVariant) : undefined) ||
+      (typeof process !== 'undefined' ? (process.env?.OPENCODE_SUPERVISOR_VARIANT as AuditorVariant) : undefined) ||
       base.auditorVariant,
   };
 }

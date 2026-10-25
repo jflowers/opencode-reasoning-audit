@@ -1,13 +1,13 @@
-# AGENTS.md — opencode-reasoning-audit
+# AGENTS.md — opencode-supervisor
 
 ## Project Overview
 
-OpenCode plugin that audits, steers, and interrupts AI reasoning while the agent works. It hooks `event` (completed reasoning parts), `chat.message` (session goal), `tool.execute.before`/`tool.execute.after` (tool guard, solved-items log), and `experimental.chat.system.transform` (supervisor memo); strips persuasive narrative from Chain-of-Thought steps, runs an independent peer audit in a dedicated side session, delivers failed-audit critiques by steering the session via `promptAsync` (interrupting first on severe findings), and blocks reward-hacking tool calls before execution.
+OpenCode supervision middleware (formerly opencode-reasoning-audit) that audits, steers, and interrupts AI reasoning while the agent works. It hooks `event` (completed reasoning parts), `chat.message` (session goal), `tool.execute.before`/`tool.execute.after` (tool guard, solved-items log), and `experimental.chat.system.transform` (supervisor memo); strips persuasive narrative from Chain-of-Thought steps, runs an independent peer audit in a dedicated side session, delivers failed-audit critiques by steering the session via `promptAsync` (interrupting first on severe findings), and blocks reward-hacking tool calls before execution. Roadmap: agent-console tools (reminders, recall, on-demand audit) and engineer directives, all on the same session-state layer.
 
 - **Type**: OpenCode middleware plugin (TypeScript library)
 - **Runtime**: Bun (primary) / Node 22+ (fallback)
 - **License**: MIT
-- **Repository**: github.com/jflowers/opencode-reasoning-audit
+- **Repository**: github.com/jflowers/opencode-supervisor
 
 ## Build & Test Commands
 
@@ -33,7 +33,7 @@ opencode plugin "$(pwd)"
 ## Project Structure
 
 ```text
-opencode-reasoning-audit/
+opencode-supervisor/
 ├── index.ts               # Plugin entry: Hooks API wiring (event, chat.message, tool.execute), pluginConfig
 ├── src/
 │   ├── auditor.ts         # Peer audit: config resolution, deterministic invariants, injected-model LLM audit
