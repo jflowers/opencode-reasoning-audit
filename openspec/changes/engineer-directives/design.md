@@ -94,8 +94,11 @@ the reason is the model's corrective signal (FR-012 philosophy).
 Directives with `when` rules surface in the memo only after a tool
 call matches (tool name, case-insensitive; or any extracted argument
 path matching the when-glob). Evaluation happens in
-`tool.execute.before` after the guard decision — a blocked call still
-records the trigger, because the attempt itself is signal. Triggered
+`tool.execute.before` BEFORE the guard decision — a blocked call still
+records the trigger, because the attempt itself is signal (recording
+first means neither the block path nor the proceed path loses it). Each
+first-recorded trigger is logged (constitution III observability).
+Triggered
 ids persist for the session (dedup, bounded by the directive count).
 `activeDirectives(directives, triggeredIds)` filters: no-when
 directives are always active; when-directives are active once

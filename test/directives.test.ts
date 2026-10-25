@@ -9,6 +9,7 @@ import {
   activeDirectives,
   compileEnforcement,
   evaluateEnforcement,
+  extractPolicyPaths,
   globToRegExp,
   matchTriggers,
   MAX_DIRECTIVES,
@@ -211,6 +212,43 @@ test('parseDirectives parses when-rules alongside enforce-rules', () => {
   assert.deepEqual(directives[0].when, [{ tool: 'bash' }, { path: 'src/crypto/**' }]);
 });
 
+test('parseDirectives skips a file whose rules fence is JSON null', () => {
+  const nulled = `${NO_SECRETS_TEXT}\n\n\`\`\`supervisor\nnull\n\`\`\`\n`;
+  const { directives, warnings } = parseDirectives([{ name: 'nulled.md', content: nulled }]);
+  assert.deepEqual(directives, []);
+  assert.equal(warnings.length, 1);
+  assert.ok(warnings[0].includes('nulled.md'));
+  assert.ok(warnings[0].includes('not a JSON object'));
+});
+
+test('parseDirectives skips a file whose rules fence is a JSON array', () => {
+  const arrayed = `${NO_SECRETS_TEXT}\n\n\`\`\`supervisor\n[]\n\`\`\`\n`;
+  const { directives, warnings } = parseDirectives([{ name: 'arrayed.md', content: arrayed }]);
+  assert.deepEqual(directives, []);
+  assert.equal(warnings.length, 1);
+  assert.ok(warnings[0].includes('arrayed.md'));
+  assert.ok(warnings[0].includes('not a JSON object'));
+});
+
+test('parseDirectives reads rules from a fence in a CRLF file', () => {
+  const crlf = `${NO_SECRETS_TEXT}\r\n\r\n\`\`\`supervisor\r\n${JSON.stringify(NO_SECRETS_RULES)}\r\n\`\`\`\r\n`;
+  const { directives, warnings } = parseDirectives([{ name: 'crlf.md', content: crlf }]);
+  assert.deepEqual(warnings, []);
+  assert.equal(directives.length, 1);
+  assert.equal(directives[0].id, 'crlf');
+  assert.equal(directives[0].text, NO_SECRETS_TEXT);
+  assert.deepEqual(directives[0].enforce, [{ forbidPath: 'secrets/**' }]);
+});
+
+test('parseDirectives warns when advisory text is truncated', () => {
+  const long = 'y'.repeat(MAX_DIRECTIVE_TEXT + 10);
+  const { directives, warnings } = parseDirectives([{ name: 'long.md', content: long }]);
+  assert.equal(directives[0].text.length, MAX_DIRECTIVE_TEXT);
+  assert.equal(warnings.length, 1);
+  assert.ok(warnings[0].includes("'long'"));
+  assert.ok(warnings[0].includes(`truncated from ${MAX_DIRECTIVE_TEXT + 10} to ${MAX_DIRECTIVE_TEXT} characters`));
+});
+
 // ── Pure module: parseOptionsDirectives (FR-026) ──
 
 test('parseOptionsDirectives validates entries and defaults missing ids', () => {
@@ -236,6 +274,15 @@ test('parseOptionsDirectives ignores a non-array value with a warning', () => {
 test('parseOptionsDirectives passes undefined and null through as empty', () => {
   assert.deepEqual(parseOptionsDirectives(undefined), { directives: [], warnings: [] });
   assert.deepEqual(parseOptionsDirectives(null), { directives: [], warnings: [] });
+});
+
+test('parseOptionsDirectives warns when advisory text is truncated', () => {
+  const long = 'z'.repeat(MAX_DIRECTIVE_TEXT + 5);
+  const { directives, warnings } = parseOptionsDirectives([{ id: 'opt-long', text: long }]);
+  assert.equal(directives[0].text.length, MAX_DIRECTIVE_TEXT);
+  assert.equal(warnings.length, 1);
+  assert.ok(warnings[0].includes("'opt-long'"));
+  assert.ok(warnings[0].includes('truncated from'));
 });
 
 // ── Pure module: globToRegExp ──
@@ -270,6 +317,39 @@ test('globToRegExp treats a question mark as one character', () => {
   const regex = globToRegExp('file?.txt');
   assert.ok(regex.test('file1.txt'));
   assert.ok(!regex.test('file12.txt'));
+});
+
+test('globToRegExp matches paths case-insensitively', () => {
+  const regex = globToRegExp('secrets/**');
+  assert.ok(regex.test('Secrets/token.ts'));
+  assert.ok(regex.test('SECRETS/a/b.pem'));
+});
+
+test('globToRegExp keeps multiple recursive segments segment-anchored', () => {
+  const regex = globToRegExp('src/**/gen/**/x.ts');
+  assert.ok(regex.test('src/gen/x.ts'));
+  assert.ok(regex.test('src/a/gen/b/x.ts'));
+  assert.ok(regex.test('src/a/b/gen/c/d/x.ts'));
+  assert.ok(!regex.test('src/xgen/x.ts'));
+  assert.ok(!regex.test('gen/x.ts'));
+});
+
+// ── Pure module: extractPolicyPaths (FR-028, FR-029) ──
+
+test('extractPolicyPaths captures slash paths and dotfiles beyond the code-extension allowlist', () => {
+  const paths = extractPolicyPaths({
+    command: 'cat .env.local secrets/credentials.pem',
+    path: 'config/production',
+    count: 3,
+  });
+  assert.ok(paths.includes('.env.local'));
+  assert.ok(paths.includes('secrets/credentials.pem'));
+  assert.ok(paths.includes('config/production'));
+});
+
+test('extractPolicyPaths returns empty for absent or non-string arguments', () => {
+  assert.deepEqual(extractPolicyPaths(undefined), []);
+  assert.deepEqual(extractPolicyPaths({ count: 3, ok: true }), []);
 });
 
 // ── Pure module: compileEnforcement + evaluateEnforcement (FR-028) ──
@@ -689,6 +769,113 @@ test('the event-hook audit prompt carries the directives advisory', async () => 
       assert.ok(prompts[0].includes(NO_SECRETS_TEXT));
       assert.ok(sessionState.get('audit-directives-session').verifiedSteps.length === 1);
       await hooks.dispose!();
+    });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a dotfile forbidPath blocks paths the extension allowlist cannot see', async () => {
+  const dir = makeDirectiveDir({
+    'no-dotenv.md': directiveFile('Never read environment files.', {
+      enforce: [{ forbidPath: '.env*' }],
+    }),
+  });
+  try {
+    await withCleanDirectivesEnv(async () => {
+      const hooks = await plugin.server(mockPluginInput(dir));
+      await assert.rejects(
+        dispatchToolBefore(hooks, 'dotenv-session', 'bash', { command: 'cat .env.local' }),
+        (error: unknown) => {
+          assert.ok(error instanceof Error);
+          assert.ok(error.message.includes("engineer directive 'no-dotenv'"));
+          assert.ok(error.message.includes('.env.local'));
+          return true;
+        }
+      );
+      await hooks.dispose!();
+    });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a case-different path still matches a forbidden glob', async () => {
+  const dir = makeDirectiveDir({
+    'no-secrets.md': directiveFile(NO_SECRETS_TEXT, NO_SECRETS_RULES),
+  });
+  try {
+    await withCleanDirectivesEnv(async () => {
+      const hooks = await plugin.server(mockPluginInput(dir));
+      await assert.rejects(
+        dispatchToolBefore(hooks, 'case-session', 'bash', { command: 'cat Secrets/token.ts' }),
+        (error: unknown) => {
+          assert.ok(error instanceof Error);
+          assert.ok(error.message.includes("engineer directive 'no-secrets'"));
+          return true;
+        }
+      );
+      await hooks.dispose!();
+    });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('an unreadable directive file is skipped while the rest still load', async () => {
+  if (process.getuid && process.getuid() === 0) return;
+  const dir = makeDirectiveDir({
+    'good.md': directiveFile(NO_SECRETS_TEXT, NO_SECRETS_RULES),
+    'locked.md': 'unreadable policy',
+  });
+  const locked = path.join(dir, '.opencode', 'supervisor', 'directives', 'locked.md');
+  fs.chmodSync(locked, 0o000);
+  try {
+    await withCleanDirectivesEnv(async () => {
+      const warnings: string[] = [];
+      const originalWarn = console.warn;
+      console.warn = (message: string) => warnings.push(message);
+      try {
+        const hooks = await plugin.server(mockPluginInput(dir));
+        sessionState.get('unreadable-session');
+        const output = { system: [] as string[] };
+        await dispatchSystemTransform(hooks, { sessionID: 'unreadable-session', model: {} }, output);
+        assert.equal(output.system.length, 1);
+        assert.ok(output.system[0].includes('- good:'));
+        await hooks.dispose!();
+      } finally {
+        console.warn = originalWarn;
+      }
+      assert.ok(warnings.some((w) => w.includes("directive file 'locked.md' unreadable")));
+    });
+  } finally {
+    fs.chmodSync(locked, 0o644);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the first-recorded trigger for a directive is logged once', async () => {
+  const dir = makeDirectiveDir({
+    'legacy-note.md': directiveFile('Explain migration constraints first.', {
+      when: [{ path: 'src/legacy/**' }],
+    }),
+  });
+  try {
+    await withCleanDirectivesEnv(async () => {
+      const logs: string[] = [];
+      const originalLog = console.log;
+      console.log = (...parts: unknown[]) => logs.push(parts.join(' '));
+      try {
+        const hooks = await plugin.server(mockPluginInput(dir));
+        sessionState.get('trigger-log-session');
+        await dispatchToolBefore(hooks, 'trigger-log-session', 'edit', { path: 'src/legacy/queue.ts' });
+        await dispatchToolBefore(hooks, 'trigger-log-session', 'edit', { path: 'src/legacy/other.ts' });
+        await hooks.dispose!();
+      } finally {
+        console.log = originalLog;
+      }
+      const hits = logs.filter((l) => l.includes("directive 'legacy-note' triggered by tool 'edit'"));
+      assert.equal(hits.length, 1);
     });
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });

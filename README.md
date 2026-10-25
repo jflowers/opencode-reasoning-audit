@@ -193,7 +193,7 @@ bun install
 # 2. Run the unit tests (works with Bun or Node 22+)
 bun test
 # Or with Node:
-node --test test/audit.test.ts test/memo.test.ts test/reminders.test.ts
+node --test test/audit.test.ts test/memo.test.ts test/reminders.test.ts test/directives.test.ts
 
 # 3. Register the plugin with OpenCode (one of the options below)
 

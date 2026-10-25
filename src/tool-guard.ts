@@ -12,7 +12,7 @@
  * imports, no I/O.
  */
 
-import { evaluateEnforcement, type CompiledEnforcement } from './directives.ts';
+import { evaluateEnforcement, extractPolicyPaths, type CompiledEnforcement } from './directives.ts';
 import type { AuditConfig } from './auditor.ts';
 
 export interface ToolVerificationResult {
@@ -54,8 +54,10 @@ const FILE_PATH_PATTERN = /[a-zA-Z0-9_.\-\/]+\.(?:ts|tsx|js|json|py|md|sql|sh)/g
 /**
  * Extracts every file-path token from the tool arguments (FR-010):
  * top-level string values scanned for path characters ending in a
- * known source/config extension. Shared by the trace check and by
- * engineer-directive enforcement and triggers (FR-028, FR-029).
+ * known source/config extension. Feeds the trace check.
+ * Engineer-directive enforcement and triggers (FR-028, FR-029) use
+ * the broader `extractPolicyPaths` instead — this extension
+ * allowlist cannot see `.env` or extensionless paths.
  */
 export function extractArgPaths(args: Record<string, unknown> | undefined): string[] {
   return Object.values(args || {})
@@ -130,7 +132,7 @@ export function verifyToolIntent(
       enforcement,
       toolCall.name,
       rawArgs,
-      extractArgPaths(toolCall.arguments)
+      extractPolicyPaths(toolCall.arguments)
     );
     if (!directiveVerdict.allowed) {
       return {
