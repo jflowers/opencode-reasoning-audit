@@ -16,7 +16,7 @@ function critiqueRecord(n: number): CritiqueRecord {
 }
 
 test('DEFAULT_MEMO_LIMITS caps solved items at 5, critiques at 3, and reminders at 10', () => {
-  assert.deepEqual(DEFAULT_MEMO_LIMITS, { maxSolvedItems: 5, maxCritiques: 3, maxReminders: 10 });
+  assert.deepEqual(DEFAULT_MEMO_LIMITS, { maxSolvedItems: 5, maxCritiques: 3, maxReminders: 10, maxReports: 5 });
 });
 
 test('buildMemo renders goal, solved items, and critiques in order', () => {
@@ -126,7 +126,7 @@ test('buildMemo honors custom limits over the defaults', () => {
       solvedItems: Array.from({ length: 3 }, (_, i) => solvedItem(i)),
       critiques: Array.from({ length: 2 }, (_, i) => critiqueRecord(i)),
     },
-    { maxSolvedItems: 2, maxCritiques: 1, maxReminders: 2 }
+    { maxSolvedItems: 2, maxCritiques: 1, maxReminders: 2, maxReports: 2 }
   );
 
   assert.ok(memo !== null);

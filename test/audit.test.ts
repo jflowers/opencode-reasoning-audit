@@ -383,7 +383,7 @@ test('resolveHookConfig resolves hook knobs session → environment → defaults
             maxRegenerations: 5,
             blockRewardHacking: false,
             stripMode: 'strict',
-            memoLimits: { maxSolvedItems: 2, maxCritiques: 1, maxReminders: 1 },
+            memoLimits: { maxSolvedItems: 2, maxCritiques: 1, maxReminders: 1, maxReports: 1 },
           },
         },
       },
@@ -392,7 +392,7 @@ test('resolveHookConfig resolves hook knobs session → environment → defaults
     assert.equal(fromSession.maxRegenerations, 5);
     assert.equal(fromSession.blockRewardHacking, false);
     assert.equal(fromSession.stripMode, 'strict');
-    assert.deepEqual(fromSession.memoLimits, { maxSolvedItems: 2, maxCritiques: 1, maxReminders: 1 });
+    assert.deepEqual(fromSession.memoLimits, { maxSolvedItems: 2, maxCritiques: 1, maxReminders: 1, maxReports: 1 });
 
     // Environment applies when no session override exists.
     process.env.OPENCODE_SUPERVISOR_MAX_REGENERATIONS = '7';
@@ -1398,7 +1398,7 @@ test('tool.execute.after accumulates solved items per session, isolated across s
   });
 });
 
-test('tool.execute.after bounds stored solved items to the memo limits', async () => {
+test('tool.execute.after retains solved items beyond the memo render cap (design D3)', async () => {
   await withCleanAuditEnv(async () => {
     process.env.OPENCODE_SUPERVISOR_MEMO_MAX_SOLVED_ITEMS = '2';
     const hooks = await plugin.server(mockPluginInput());
@@ -1408,17 +1408,25 @@ test('tool.execute.after bounds stored solved items to the memo limits', async (
       await dispatchToolAfter(hooks, sessionID, 'bash', { title: step, output: `${step} output`, metadata: {} });
     }
 
-    // FR-017 storage bound: only the two most recent entries survive.
+    // Design D3: storage retention (SOLVED_RETENTION_CAP, 50) is deeper
+    // than the memo render cap, so recall can reach entries the memo no
+    // longer shows — all three entries survive the env-capped render of 2.
     const state = sessionState.get(sessionID);
-    assert.equal(state.solvedItems.length, 2);
+    assert.equal(state.solvedItems.length, 3);
     assert.deepEqual(
       state.solvedItems.map((item) => item.outcome),
-      ['second output', 'third output']
+      ['first output', 'second output', 'third output']
     );
+    // FR-017 render bound: the memo still shows only the two most recent.
+    const system: string[] = ['base prompt'];
+    await dispatchSystemTransform(hooks, { sessionID, model: {} }, { system });
+    assert.ok(system[1]!.includes('second output'));
+    assert.ok(system[1]!.includes('third output'));
+    assert.ok(!system[1]!.includes('first output'));
   });
 });
 
-test('critique delivery bounds the stored critique log to the memo limits', async () => {
+test('critique delivery retains the critique log beyond the memo render cap (design D3)', async () => {
   await withCleanAuditEnv(async () => {
     process.env.OPENCODE_SUPERVISOR_MAX_REGENERATIONS = '3';
     process.env.OPENCODE_SUPERVISOR_MEMO_MAX_CRITIQUES = '2';
@@ -1433,13 +1441,20 @@ test('critique delivery bounds the stored critique log to the memo limits', asyn
     await dispatchPart(hooks, completedReasoningPart({ sessionID, id: 'p3', messageID: 'msg-3', text: 'c = 3 + 3 = 7' }));
 
     assert.equal(calls.promptAsync.length, 3);
-    // FR-017 storage bound: only the two most recent critiques survive.
+    // Design D3: storage retention (CRITIQUE_RETENTION_CAP, 30) is deeper
+    // than the memo render cap of 2 — all three critiques survive, and the
+    // memo renders only the two most recent.
     const state = sessionState.get(sessionID);
-    assert.equal(state.critiqueLog.length, 2);
+    assert.equal(state.critiqueLog.length, 3);
     assert.deepEqual(
       state.critiqueLog.map((entry) => entry.delivered),
-      [true, true]
+      [true, true, true]
     );
+    const system: string[] = ['base prompt'];
+    await dispatchSystemTransform(hooks, { sessionID, model: {} }, { system });
+    assert.ok(system[1]!.includes('Recent critiques:'));
+    assert.ok(!system[1]!.includes(state.critiqueLog[0].text));
+    assert.ok(system[1]!.includes(state.critiqueLog[2].text));
   });
 });
 

@@ -2,20 +2,22 @@
  * Supervision Memo Builder
  * Formats the session's supervision context — the goal (FR-013), the
  * active engineer directives (FR-030), the agent's reminders
- * (FR-020), the solved-items log (FR-014), and the prior-critiques
- * log (FR-015) — into the bounded memo appended to the system
- * prompt before each model call (FR-016). Each section appears
- * only when it has content; a session with nothing to show yields no memo
- * at all, so the system prompt is left untouched. Solved items, critiques,
- * and reminders are capped at configurable maximums, keeping the most
- * recent entries, so the memo cannot grow without limit across a long
- * session (FR-017, FR-023); directives carry their own fixed render
+ * (FR-020), the solved-items log (FR-014), the agent's self-reported
+ * events (FR-036), and the prior-critiques log (FR-015) — into the
+ * bounded memo appended to the system prompt before each model call
+ * (FR-016). Each section appears only when it has content; a session
+ * with nothing to show yields no memo at all, so the system prompt is
+ * left untouched. Solved items, critiques, reminders, and agent
+ * reports are capped at configurable maximums, keeping the most recent
+ * entries, so the memo cannot grow without limit across a long session
+ * (FR-017, FR-023, FR-035); directives carry their own fixed render
  * budget (FR-032). Pure module: no OpenCode
  * imports, no I/O, no session state — the hook layer (design D4) owns the
  * Maps and passes plain data in.
  */
 
 import type { AuditSeverity } from './auditor.ts';
+import { renderReports, type AgentReport } from './console.ts';
 import { renderDirectives, type DirectiveText } from './directives.ts';
 import { renderReminders, type Reminder } from './reminders.ts';
 
@@ -40,6 +42,8 @@ export interface MemoInput {
   directives?: DirectiveText[];
   /** Agent-set reminders (FR-020); optional so reminder-less callers are unchanged. */
   reminders?: Reminder[];
+  /** Agent self-reported events (FR-034); optional so report-less callers are unchanged. */
+  agentReports?: AgentReport[];
   solvedItems: SolvedItem[];
   critiques: CritiqueRecord[];
 }
@@ -51,9 +55,16 @@ export interface MemoLimits {
   maxCritiques: number;
   /** Cap on reminders stored and shown (FR-023). */
   maxReminders: number;
+  /** Cap on agent reports stored and shown (FR-035, FR-036). */
+  maxReports: number;
 }
 
-export const DEFAULT_MEMO_LIMITS: MemoLimits = { maxSolvedItems: 5, maxCritiques: 3, maxReminders: 10 };
+export const DEFAULT_MEMO_LIMITS: MemoLimits = {
+  maxSolvedItems: 5,
+  maxCritiques: 3,
+  maxReminders: 10,
+  maxReports: 5,
+};
 
 /**
  * Bounds a log to its most recent entries (FR-017): the end of the array
@@ -70,11 +81,12 @@ function takeMostRecent<T>(items: T[], cap: number): T[] {
 
 /**
  * Builds the supervision memo (FR-016): the session goal, the agent's
- * reminders (FR-020), recently solved items (FR-014), and recent
- * critiques (FR-015), each section present only when it has content.
- * Reminders, solved items, and critiques are bounded to their most
- * recent entries within the configured caps (FR-017, FR-023). Reminder
- * ids render with their text so `forget_reminder` is usable from the
+ * reminders (FR-020), recently solved items (FR-014), the agent's
+ * self-reported events (FR-036), and recent critiques (FR-015), each
+ * section present only when it has content. Reminders, solved items,
+ * agent reports, and critiques are bounded to their most recent entries
+ * within the configured caps (FR-017, FR-023, FR-035). Reminder ids
+ * render with their text so `forget_reminder` is usable from the
  * memo alone (FR-021). Both
  * delivered and withheld critiques render, marked with severity and
  * delivery so the agent can tell them apart. When there is nothing to
@@ -90,6 +102,7 @@ export function buildMemo(input: MemoInput, limits: MemoLimits = DEFAULT_MEMO_LI
   const directives = input.directives ?? [];
   const reminders = takeMostRecent(input.reminders ?? [], limits.maxReminders);
   const solvedItems = takeMostRecent(input.solvedItems, limits.maxSolvedItems);
+  const agentReports = takeMostRecent(input.agentReports ?? [], limits.maxReports);
   const critiques = takeMostRecent(input.critiques, limits.maxCritiques);
 
   if (
@@ -97,6 +110,7 @@ export function buildMemo(input: MemoInput, limits: MemoLimits = DEFAULT_MEMO_LI
     directives.length === 0 &&
     reminders.length === 0 &&
     solvedItems.length === 0 &&
+    agentReports.length === 0 &&
     critiques.length === 0
   ) {
     return null;
@@ -125,6 +139,13 @@ export function buildMemo(input: MemoInput, limits: MemoLimits = DEFAULT_MEMO_LI
   if (solvedItems.length > 0) {
     const lines = solvedItems.map((item) => `- ${item.tool}: ${item.outcome}`);
     sections.push(`Recently solved:\n${lines.join('\n')}`);
+  }
+
+  if (agentReports.length > 0) {
+    const rendered = renderReports(input.agentReports ?? [], limits.maxReports);
+    if (rendered !== null) {
+      sections.push(rendered);
+    }
   }
 
   if (critiques.length > 0) {

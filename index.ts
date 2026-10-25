@@ -6,6 +6,8 @@
  * (`event`), capture the session goal (`chat.message`), guard tool
  * execution (`tool.execute.before` / `tool.execute.after`), offer
  * the agent self-serve reminder tools (`tool`, FR-020/FR-021),
+ * the agent console's second slice — recall, report, and
+ * on-demand audit tools (`tool`, FR-033..FR-041),
  * load and enforce engineer directives (FR-026..FR-032), and inject
  * the supervision memo (`experimental.chat.system.transform`). All
  * audit logic lives in the pure `src/` modules; this file owns the
@@ -34,7 +36,23 @@ import {
 } from './src/auditor.ts';
 import { stripNarrative } from './src/stripper.ts';
 import { verifyToolIntent, type ToolVerificationResult } from './src/tool-guard.ts';
-import { buildMemo, DEFAULT_MEMO_LIMITS, type CritiqueRecord, type MemoLimits, type SolvedItem } from './src/memo.ts';
+import {
+  buildMemo,
+  DEFAULT_MEMO_LIMITS,
+  type CritiqueRecord,
+  type MemoLimits,
+  type SolvedItem
+} from './src/memo.ts';
+import {
+  addReport,
+  CRITIQUE_RETENTION_CAP,
+  prepareReportText,
+  renderRecall,
+  REPORT_KINDS,
+  SOLVED_RETENTION_CAP,
+  type AgentReport,
+  type ReportKind
+} from './src/console.ts';
 import {
   addReminder,
   clearReminder,
@@ -63,6 +81,8 @@ const ENV_REQUIRE_STEP_REFERENCE = 'OPENCODE_SUPERVISOR_REQUIRE_STEP_REFERENCE_I
 const ENV_MEMO_MAX_SOLVED_ITEMS = 'OPENCODE_SUPERVISOR_MEMO_MAX_SOLVED_ITEMS';
 const ENV_MEMO_MAX_CRITIQUES = 'OPENCODE_SUPERVISOR_MEMO_MAX_CRITIQUES';
 const ENV_MEMO_MAX_REMINDERS = 'OPENCODE_SUPERVISOR_MEMO_MAX_REMINDERS';
+const ENV_MEMO_MAX_REPORTS = 'OPENCODE_SUPERVISOR_MEMO_MAX_REPORTS';
+const ENV_MAX_ON_DEMAND_AUDITS = 'OPENCODE_SUPERVISOR_MAX_ON_DEMAND_AUDITS';
 
 /**
  * Hook-layer configuration: the auditor's `AuditConfig` plus the memo
@@ -70,8 +90,10 @@ const ENV_MEMO_MAX_REMINDERS = 'OPENCODE_SUPERVISOR_MEMO_MAX_REMINDERS';
  * precedence session plugin config → environment → `pluginConfig`.
  */
 export interface HookConfig extends AuditConfig {
-  /** Caps on memo solved items, critiques, and reminders (FR-017, FR-023). */
+  /** Caps on memo solved items, critiques, reminders, and reports (FR-017, FR-023, FR-035/FR-036). */
   memoLimits: MemoLimits;
+  /** Per-session cap on on-demand audits requested through the request_audit tool (FR-039). */
+  maxOnDemandAudits: number;
 }
 
 /**
@@ -89,6 +111,7 @@ export const pluginConfig: HookConfig = {
   blockRewardHacking: true,
   requireStepReferenceInTools: true,
   memoLimits: { ...DEFAULT_MEMO_LIMITS },
+  maxOnDemandAudits: 8,
 };
 
 /**
@@ -186,7 +209,11 @@ export function resolveHookConfig(session?: SessionWithPluginConfig): HookConfig
         pickNumber(memoOverrides.maxCritiques) ?? envNumber(ENV_MEMO_MAX_CRITIQUES) ?? pluginConfig.memoLimits.maxCritiques,
       maxReminders:
         pickNumber(memoOverrides.maxReminders) ?? envNumber(ENV_MEMO_MAX_REMINDERS) ?? pluginConfig.memoLimits.maxReminders,
+      maxReports:
+        pickNumber(memoOverrides.maxReports) ?? envNumber(ENV_MEMO_MAX_REPORTS) ?? pluginConfig.memoLimits.maxReports,
     },
+    maxOnDemandAudits:
+      pickNumber(overrides.maxOnDemandAudits) ?? envNumber(ENV_MAX_ON_DEMAND_AUDITS) ?? pluginConfig.maxOnDemandAudits,
   };
 }
 
@@ -208,6 +235,10 @@ export interface SessionState {
   reminders: Reminder[];
   /** Monotonic reminder-id sequence (design D3): ids are `r<n>` and never recycled. */
   reminderSeq: number;
+  /** Agent self-reported events (FR-034), bounded to the most recent (FR-035). */
+  agentReports: AgentReport[];
+  /** On-demand audits run this session (FR-039); bound is `maxOnDemandAudits`. */
+  onDemandAuditCount: number;
   /** Directive ids whose `when` rules matched a tool call (FR-029), deduped for the session. */
   triggeredDirectives: string[];
   /**
@@ -230,6 +261,8 @@ function emptySessionState(): SessionState {
     critiqueLog: [],
     reminders: [],
     reminderSeq: 0,
+    agentReports: [],
+    onDemandAuditCount: 0,
     triggeredDirectives: [],
     seenParts: new Set(),
   };
@@ -659,8 +692,9 @@ function critiqueMessage(critique: string): string {
  * without spending the bound, contradicting the bounded-intervention
  * amendment above. Either way the failed critique is recorded as
  * withheld; the log itself is storage-bounded to
- * `memoLimits.maxCritiques` (FR-017, most-recent, via `appendBounded`)
- * so long sessions cannot grow it without limit.
+ * `CRITIQUE_RETENTION_CAP` (FR-017; design D3 retention — deeper than
+ * the memo render cap so recall reaches further; most-recent, via
+ * `appendBounded`) so long sessions cannot grow it without limit.
  *
  * Never rejects (FR-005): transport rejections and in-band response
  * errors fail open — logged and recorded as undelivered — because the
@@ -684,7 +718,7 @@ function createCritiqueDelivery(client: PluginInput['client']): (request: Critiq
     // reservation below follows this check immediately, before any
     // await, so check-and-reserve stays atomic under concurrent audits.
     if (state.critiqueCount >= config.maxRegenerations) {
-      appendBounded(state.critiqueLog, { text: critique, severity, delivered: false }, config.memoLimits.maxCritiques);
+      appendBounded(state.critiqueLog, { text: critique, severity, delivered: false }, CRITIQUE_RETENTION_CAP);
       console.warn(
         `[supervisor] critique bound (${config.maxRegenerations}) reached for session ${sessionID}; ` +
           'critique recorded without delivery'
@@ -725,8 +759,8 @@ function createCritiqueDelivery(client: PluginInput['client']): (request: Critiq
         throw new Error(responseFailure('critique delivery failed', delivered));
       }
       // FR-015: record the delivered critique; the log itself is
-      // storage-bounded to memoLimits.maxCritiques (FR-017).
-      appendBounded(state.critiqueLog, { text: critique, severity, delivered: true }, config.memoLimits.maxCritiques);
+      // storage-bounded to CRITIQUE_RETENTION_CAP (FR-017; design D3).
+      appendBounded(state.critiqueLog, { text: critique, severity, delivered: true }, CRITIQUE_RETENTION_CAP);
     } catch (error) {
       // Transport failure (FR-005 fail-open): record the attempt as
       // withheld so the memo can still surface it. Slot release is
@@ -740,7 +774,7 @@ function createCritiqueDelivery(client: PluginInput['client']): (request: Critiq
       if (severity !== 'severe') {
         state.critiqueCount -= 1;
       }
-      appendBounded(state.critiqueLog, { text: critique, severity, delivered: false }, config.memoLimits.maxCritiques);
+      appendBounded(state.critiqueLog, { text: critique, severity, delivered: false }, CRITIQUE_RETENTION_CAP);
       console.error(`[supervisor] critique delivery failed open: ${errorText(error)}`);
     }
   };
@@ -1096,7 +1130,9 @@ const server = async (input: PluginInput, options?: PluginOptions): Promise<Hook
      * tool output collapsed to one line and truncated short
      * (`solvedOutcome`); the hook typings expose no error field, so an
      * unreadable output logs the placeholder 'completed'. Storage is
-     * bounded to the resolved memoLimits at append time (FR-017).
+     * bounded to the `SOLVED_RETENTION_CAP` retention constant
+     * (FR-017; design D3 — deeper than the memo render cap, so
+     * recall reaches further than the memo shows).
      * Fail-open (FR-005): odd payloads are logged, never thrown.
      */
     'tool.execute.after': async (hookInput, output) => {
@@ -1110,7 +1146,7 @@ const server = async (input: PluginInput, options?: PluginOptions): Promise<Hook
         appendBounded(
           state.solvedItems,
           { tool: hookInput.tool, outcome: solvedOutcome(output) },
-          resolveHookConfig().memoLimits.maxSolvedItems
+          SOLVED_RETENTION_CAP
         );
       } catch (error) {
         console.error('[supervisor] tool.execute.after hook failed open:', errorText(error));
@@ -1130,6 +1166,18 @@ const server = async (input: PluginInput, options?: PluginOptions): Promise<Hook
      * never state. The execute bodies are pure state operations: no
      * network, no async infrastructure, so no fail-open wrapper is
      * needed.
+     *
+     * Second slice (FR-033..FR-041; supervisor-tools design D1):
+     * recall (read the full retained state, past the memo's recency
+     * window), report (self-reported blocker/deviation/outcome/note
+     * events that ride the memo for the engineer), and request_audit
+     * (agent-initiated peer audit of a stated claim; the critique
+     * returns in the tool result — solicited, so no steer/interrupt).
+     * Same state layer, same side-session inertness (FR-040), same
+     * fail-open posture (FR-041). The request_audit body composes
+     * the existing strip→invariants→peer-audit pipeline over the
+     * focus text; agent-authored report text never enters audit
+     * prompts (FR-042).
      */
     tool: {
       remind_me: tool({
@@ -1202,6 +1250,136 @@ const server = async (input: PluginInput, options?: PluginOptions): Promise<Hook
           return `Reminder ${args.id} cleared.`;
         },
       }),
+      recall: tool({
+        description:
+          'Read the session\'s full retained supervision state — beyond what the supervisor memo shows each turn. ' +
+          'Use it when a fact has scrolled out of the memo: solved items, critiques, reminders, or the goal. ' +
+          'Supported sections: goal, reminders, solved, critiques, all (default all).',
+        args: {
+          what: tool.schema.string().optional().describe('Section to recall: goal, reminders, solved, critiques, or all (default all).'),
+        },
+        execute: async (args, context) => {
+          // FR-040: side sessions are audit machinery — inert result.
+          if (isAuditorSessionId(context.sessionID)) {
+            return 'Console tools are not available in supervisor side sessions.';
+          }
+          // FR-041: odd payloads fall back to the documented default.
+          const what = typeof args?.what === 'string' ? args.what : 'all';
+          // FR-033: read-only recall over the retained state (D3 retention
+          // keeps more than the memo renders, so recall reaches further).
+          const state = sessionState.get(context.sessionID);
+          return renderRecall(what, {
+            goal: state.goal,
+            reminders: state.reminders,
+            solvedItems: state.solvedItems,
+            critiques: state.critiqueLog,
+          });
+        },
+      }),
+      report: tool({
+        description:
+          'Report a supervision-relevant event to the engineer: a blocker (something stopping progress), ' +
+          'a deviation (a departure from the stated goal or constraints), an outcome (a result the engineer should know), ' +
+          'or a note (anything worth keeping in view). Reports ride the supervisor memo each turn and are kept to the most recent few.',
+        args: {
+          kind: tool.schema.string().describe('The report kind: blocker, deviation, outcome, or note.'),
+          text: tool.schema.string().describe('The event to report, stated plainly — one or two sentences.'),
+        },
+        execute: async (args, context) => {
+          // FR-040: side sessions are audit machinery — inert result.
+          if (isAuditorSessionId(context.sessionID)) {
+            return 'Console tools are not available in supervisor side sessions.';
+          }
+          // FR-034: the kind is validated first — an unknown kind stores
+          // nothing and yields the supported list (actionable, FR-041).
+          const kind = typeof args?.kind === 'string' ? args.kind : '';
+          if (!(REPORT_KINDS as readonly string[]).includes(kind)) {
+            return `Unknown report kind "${kind}" — supported kinds: ${REPORT_KINDS.join(', ')}.`;
+          }
+          // FR-025 hygiene mirrored: whitespace-only rejected, over-length
+          // truncated at the fixed ceiling (2000 characters).
+          const rawText = typeof args?.text === 'string' ? args.text : '';
+          const prepared = prepareReportText(rawText);
+          if (!prepared.ok) {
+            return prepared.error;
+          }
+          const state = sessionState.get(context.sessionID);
+          // FR-035: storage bounded to the most recent reports at append
+          // time (the render-side bound lives in buildMemo).
+          state.agentReports = addReport(
+            state.agentReports,
+            { kind: kind as ReportKind, text: prepared.text, addedAt: new Date().toISOString() },
+            resolveHookConfig().memoLimits.maxReports
+          );
+          // FR-034: the result echoes the stored text — in-conversation
+          // delivery that survives gateway memo drops (D7).
+          const truncationNote = prepared.truncated ? ' (truncated to 2000 characters)' : '';
+          return `${kind} report recorded: ${prepared.text}${truncationNote}. It appears in the supervisor memo for the engineer.`;
+        },
+      }),
+      request_audit: tool({
+        description:
+          'Request an immediate peer audit of a stated claim or step — the same audit the supervisor runs on completed reasoning. ' +
+          'Use it at a decision point: state the claim and the code, math, or commands it depends on. ' +
+          'A passing audit records the claim in the verified trace; a failing audit returns the critique directly in this result. ' +
+          'Bounded per session; the automatic audit loop is unaffected.',
+        args: {
+          focus: tool.schema.string().describe('The claim or step to audit, with the code, math, or commands it depends on.'),
+        },
+        execute: async (args, context) => {
+          // FR-040: side sessions are audit machinery — inert result.
+          if (isAuditorSessionId(context.sessionID)) {
+            return 'Console tools are not available in supervisor side sessions.';
+          }
+          // FR-037/FR-041: whitespace-only focus is rejected without an
+          // audit; odd payloads fall through to the same actionable result.
+          const focus = typeof args?.focus === 'string' ? args.focus : '';
+          if (focus.trim() === '') {
+            return 'Audit focus is empty after trimming — state the claim or step to check.';
+          }
+          const state = sessionState.get(context.sessionID);
+          const config = resolveHookConfig();
+          // FR-037: the same pipeline as reasoning steps — strip narrative
+          // per config.stripMode before invariants and the audit itself.
+          const [stripped] = stripNarrative([focus], config.stripMode);
+          if (stripped === undefined || stripped === '') {
+            // No formal content survives: no model call, no bound use.
+            return 'Audit focus contained no formal content after narrative stripping — restate the claim with the code, math, or commands it depends on.';
+          }
+          // FR-039: per-session bound; rejections above never consume it.
+          if (state.onDemandAuditCount >= config.maxOnDemandAudits) {
+            return `On-demand audit limit reached (${config.maxOnDemandAudits} per session) — no audit ran. The automatic audit loop remains in effect.`;
+          }
+          state.onDemandAuditCount += 1;
+          // D5: compose the existing audit pipeline over the focus text.
+          // Agent-authored reports never enter this prompt (FR-042).
+          try {
+            const outcome = await runPeerAudit([stripped], config, invokeModel, state.goal, directivesAdvisory ?? undefined);
+            if (outcome.passed) {
+              // Passed focus joins the verified trace in stripped form —
+              // the same trust class as passed reasoning steps (FR-037).
+              state.verifiedSteps.push(stripped);
+              if (outcome.error !== undefined) {
+                console.warn('[supervisor] on-demand audit failed open; focus recorded as passed:', outcome.error);
+              }
+              return `Audit passed — the focus is recorded in the verified trace:\n${stripped}`;
+            }
+            // FR-038: solicited critique — delivered in this tool result
+            // only. No steer, no interrupt, no regeneration-budget use;
+            // the failed focus stays out of the verified trace.
+            const severity = outcome.severity ?? 'minor';
+            appendBounded(
+              state.critiqueLog,
+              { text: outcome.critique, severity, delivered: true },
+              CRITIQUE_RETENTION_CAP
+            );
+            return `Audit failed (${severity}):\n${outcome.critique}`;
+          } catch (error) {
+            // FR-041: never throw — the tool result is the channel.
+            return `Audit infrastructure failed open: ${errorText(error)} — the automatic audit loop remains in effect.`;
+          }
+        },
+      }),
     },
 
     /**
@@ -1241,6 +1419,8 @@ const server = async (input: PluginInput, options?: PluginOptions): Promise<Hook
           reminders: state.reminders,
           solvedItems: state.solvedItems,
           critiques: state.critiqueLog,
+          // FR-036: agent self-reports ride the memo (bounded render).
+          agentReports: state.agentReports,
         },
         resolveHookConfig().memoLimits
       );

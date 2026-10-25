@@ -196,7 +196,7 @@ test('buildMemo bounds the Reminders section by maxReminders', () => {
       solvedItems: [],
       critiques: [],
     },
-    { maxSolvedItems: 5, maxCritiques: 3, maxReminders: 2 }
+    { maxSolvedItems: 5, maxCritiques: 3, maxReminders: 2, maxReports: 5 }
   );
   assert.ok(memo);
   assert.ok(!memo.includes('- r1: first'));

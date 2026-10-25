@@ -2,17 +2,17 @@
 
 ## 1. Pure console module (src/console.ts)
 
-- [ ] 1.1 Create src/console.ts with the AgentReport type (kind, text,
+- [x] 1.1 Create src/console.ts with the AgentReport type (kind, text,
   addedAt), REPORT_KINDS list, MAX_REPORT_TEXT (2000), and retention
   constants SOLVED_RETENTION_CAP (50) and CRITIQUE_RETENTION_CAP (30).
   Verify: module imports cleanly in a Bun/Node script and constants are
   exported (FR-034, FR-035 basis; design D2, D3).
-- [ ] 1.2 Implement prepareReportText (trim, reject whitespace-only,
+- [x] 1.2 Implement prepareReportText (trim, reject whitespace-only,
   truncate at 2000 with a truncated flag) and addReport (append-bounded,
   drops oldest beyond cap). Verify: unit tests in test/console.test.ts
   covering whitespace rejection, truncation note, and cap-drop behavior
   pass (FR-034, FR-035).
-- [ ] 1.3 Implement renderReports (bounded "Agent reports" memo section,
+- [x] 1.3 Implement renderReports (bounded "Agent reports" memo section,
   omitted when empty) and renderRecall (goal / reminders / solved /
   critiques / all views, unsupported `what` returns an actionable
   listing). Verify: unit tests for each `what` value, empty-section
@@ -21,7 +21,7 @@
 
 ## 2. Memo integration (src/memo.ts)
 
-- [ ] 2.1 Add agentReports to MemoInput (optional) and maxReports to
+- [x] 2.1 Add agentReports to MemoInput (optional) and maxReports to
   MemoLimits (required, default 5) with the OPENCODE_SUPERVISOR_MEMO_MAX_
   REPORTS env override in the precedence chain; render the bounded
   "Agent reports" section between solved items and critiques. Verify:
@@ -31,17 +31,17 @@
 
 ## 3. Hook wiring (index.ts)
 
-- [ ] 3.1 Extend SessionState with agentReports and onDemandAuditCount;
+- [x] 3.1 Extend SessionState with agentReports and onDemandAuditCount;
   clear them on dispose. Add maxOnDemandAudits to HookConfig with the
   OPENCODE_SUPERVISOR_MAX_ON_DEMAND_AUDITS env override and default 8
   in resolveHookConfig. Verify: config-resolution tests pass for both
   new knobs (session -> env -> default precedence) (FR-035, FR-039,
   design D6).
-- [ ] 3.2 Switch the solved-items and critique-log append sites from
+- [x] 3.2 Switch the solved-items and critique-log append sites from
   memoLimits caps to the console.ts retention constants so stored lists
   outlive the memo's render caps. Verify: a hook-layer test recalls
   more solved items than the memo renders (FR-033, design D3).
-- [ ] 3.3 Register the recall, report, and request_audit tools in the
+- [x] 3.3 Register the recall, report, and request_audit tools in the
   Hooks.tool map beside remind_me / forget_reminder, following the same
   pattern: side-session inert check first, resolveHookConfig for bounds,
   actionable error results, echo text in results. request_audit composes
@@ -52,14 +52,14 @@
   side-session inertness, bound exceeded, failed-audit no-steer with
   critique-log record, and passed-audit trace append (FR-033, FR-034,
   FR-037, FR-038, FR-039, FR-040, design D5, D6).
-- [ ] 3.4 Keep console-tool bodies fail-open: no thrown errors on
+- [x] 3.4 Keep console-tool bodies fail-open: no thrown errors on
   malformed payloads, actionable results instead. Verify: hook-layer
   test with malformed arguments yields a result, not a rejection
   (FR-041).
 
 ## 4. Trust boundary
 
-- [ ] 4.1 Ensure self-reported report text never enters peer-audit
+- [x] 4.1 Ensure self-reported report text never enters peer-audit
   prompts: reports ride the memo of the supervised session only. Verify:
   a test storing a report, then running an audit, asserts the invoked
   model prompt does not contain the report text (FR-042, design D8).
