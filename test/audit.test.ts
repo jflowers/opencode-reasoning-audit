@@ -35,7 +35,7 @@ test('resolveAuditorConfig respects session model slug and variant overrides', (
     {
       config: {
         plugins: {
-          'opencode-reasoning-audit': {
+          'opencode-supervisor': {
             auditorModel: 'openai/o3-mini',
             auditorVariant: 'high',
           },
@@ -62,10 +62,10 @@ const neverInvokeModel: InvokeModel = async () => {
 };
 
 test('resolveAuditorConfig falls back from session config to environment to defaults', () => {
-  const savedModel = process.env.OPENCODE_AUDITOR_MODEL;
-  const savedVariant = process.env.OPENCODE_AUDITOR_VARIANT;
-  process.env.OPENCODE_AUDITOR_MODEL = 'anthropic/env-model';
-  process.env.OPENCODE_AUDITOR_VARIANT = 'medium';
+  const savedModel = process.env.OPENCODE_SUPERVISOR_MODEL;
+  const savedVariant = process.env.OPENCODE_SUPERVISOR_VARIANT;
+  process.env.OPENCODE_SUPERVISOR_MODEL = 'anthropic/env-model';
+  process.env.OPENCODE_SUPERVISOR_VARIANT = 'medium';
   try {
     const fromEnv = resolveAuditorConfig(baseAuditConfig);
     assert.equal(fromEnv.auditorModel, 'anthropic/env-model');
@@ -74,7 +74,7 @@ test('resolveAuditorConfig falls back from session config to environment to defa
     const fromSession = resolveAuditorConfig(baseAuditConfig, {
       config: {
         plugins: {
-          'opencode-reasoning-audit': {
+          'opencode-supervisor': {
             auditorModel: 'openai/session-model',
             auditorVariant: 'high',
           },
@@ -85,14 +85,14 @@ test('resolveAuditorConfig falls back from session config to environment to defa
     assert.equal(fromSession.auditorVariant, 'high');
   } finally {
     if (savedModel === undefined) {
-      delete process.env.OPENCODE_AUDITOR_MODEL;
+      delete process.env.OPENCODE_SUPERVISOR_MODEL;
     } else {
-      process.env.OPENCODE_AUDITOR_MODEL = savedModel;
+      process.env.OPENCODE_SUPERVISOR_MODEL = savedModel;
     }
     if (savedVariant === undefined) {
-      delete process.env.OPENCODE_AUDITOR_VARIANT;
+      delete process.env.OPENCODE_SUPERVISOR_VARIANT;
     } else {
-      process.env.OPENCODE_AUDITOR_VARIANT = savedVariant;
+      process.env.OPENCODE_SUPERVISOR_VARIANT = savedVariant;
     }
   }
 });
@@ -333,14 +333,14 @@ function mockPluginInput(): PluginInput {
         delete: async () => ({}),
       },
     },
-    directory: '/tmp/reasoning-audit-test',
+    directory: '/tmp/supervisor-test',
   } as unknown as PluginInput;
 }
 
 test('plugin module imports cleanly and exports the PluginModule entry', async () => {
   // The id matches the plugin-config key (review finding #5): a user
   // discovering the registered plugin id can use it as the config key.
-  assert.equal(plugin.id, 'opencode-reasoning-audit');
+  assert.equal(plugin.id, 'opencode-supervisor');
   assert.equal(typeof plugin.server, 'function');
 
   const hooks = await plugin.server(mockPluginInput());
@@ -354,14 +354,14 @@ test('plugin module imports cleanly and exports the PluginModule entry', async (
 
 test('resolveHookConfig resolves hook knobs session → environment → defaults', () => {
   const envNames = [
-    'OPENCODE_AUDITOR_MODEL',
-    'OPENCODE_AUDITOR_VARIANT',
-    'OPENCODE_AUDITOR_MAX_REGENERATIONS',
-    'OPENCODE_AUDITOR_STRIP_MODE',
-    'OPENCODE_AUDITOR_BLOCK_REWARD_HACKING',
-    'OPENCODE_AUDITOR_REQUIRE_STEP_REFERENCE_IN_TOOLS',
-    'OPENCODE_AUDITOR_MEMO_MAX_SOLVED_ITEMS',
-    'OPENCODE_AUDITOR_MEMO_MAX_CRITIQUES',
+    'OPENCODE_SUPERVISOR_MODEL',
+    'OPENCODE_SUPERVISOR_VARIANT',
+    'OPENCODE_SUPERVISOR_MAX_REGENERATIONS',
+    'OPENCODE_SUPERVISOR_STRIP_MODE',
+    'OPENCODE_SUPERVISOR_BLOCK_REWARD_HACKING',
+    'OPENCODE_SUPERVISOR_REQUIRE_STEP_REFERENCE_IN_TOOLS',
+    'OPENCODE_SUPERVISOR_MEMO_MAX_SOLVED_ITEMS',
+    'OPENCODE_SUPERVISOR_MEMO_MAX_CRITIQUES',
   ];
   const saved: Record<string, string | undefined> = {};
   for (const name of envNames) {
@@ -374,7 +374,7 @@ test('resolveHookConfig resolves hook knobs session → environment → defaults
     const fromSession = resolveHookConfig({
       config: {
         plugins: {
-          'opencode-reasoning-audit': {
+          'opencode-supervisor': {
             auditorModel: 'openai/o3-mini',
             maxRegenerations: 5,
             blockRewardHacking: false,
@@ -391,11 +391,11 @@ test('resolveHookConfig resolves hook knobs session → environment → defaults
     assert.deepEqual(fromSession.memoLimits, { maxSolvedItems: 2, maxCritiques: 1 });
 
     // Environment applies when no session override exists.
-    process.env.OPENCODE_AUDITOR_MAX_REGENERATIONS = '7';
-    process.env.OPENCODE_AUDITOR_BLOCK_REWARD_HACKING = 'false';
-    process.env.OPENCODE_AUDITOR_MEMO_MAX_SOLVED_ITEMS = '9';
-    process.env.OPENCODE_AUDITOR_MEMO_MAX_CRITIQUES = '4';
-    process.env.OPENCODE_AUDITOR_STRIP_MODE = 'balanced';
+    process.env.OPENCODE_SUPERVISOR_MAX_REGENERATIONS = '7';
+    process.env.OPENCODE_SUPERVISOR_BLOCK_REWARD_HACKING = 'false';
+    process.env.OPENCODE_SUPERVISOR_MEMO_MAX_SOLVED_ITEMS = '9';
+    process.env.OPENCODE_SUPERVISOR_MEMO_MAX_CRITIQUES = '4';
+    process.env.OPENCODE_SUPERVISOR_STRIP_MODE = 'balanced';
     const fromEnv = resolveHookConfig();
     assert.equal(fromEnv.maxRegenerations, 7);
     assert.equal(fromEnv.blockRewardHacking, false);
@@ -417,9 +417,9 @@ test('resolveHookConfig resolves hook knobs session → environment → defaults
     assert.deepEqual(fromDefaults.memoLimits, DEFAULT_MEMO_LIMITS);
 
     // Invalid environment values fall through to defaults (fail-open).
-    process.env.OPENCODE_AUDITOR_MAX_REGENERATIONS = 'not-a-number';
-    process.env.OPENCODE_AUDITOR_STRIP_MODE = 'bogus';
-    process.env.OPENCODE_AUDITOR_BLOCK_REWARD_HACKING = 'maybe';
+    process.env.OPENCODE_SUPERVISOR_MAX_REGENERATIONS = 'not-a-number';
+    process.env.OPENCODE_SUPERVISOR_STRIP_MODE = 'bogus';
+    process.env.OPENCODE_SUPERVISOR_BLOCK_REWARD_HACKING = 'maybe';
     const invalid = resolveHookConfig();
     assert.equal(invalid.maxRegenerations, 2);
     assert.equal(invalid.stripMode, 'code_and_math');
@@ -515,7 +515,7 @@ test('createInvokeModel drives a dedicated auditor side session and returns its 
   assert.equal(text, 'Audit complete.\n\n{"passed":true}');
 
   assert.equal(calls.create.length, 1);
-  assert.equal(calls.create[0].body.title, 'reasoning-audit @ google/gemini-3.8-flash (low)');
+  assert.equal(calls.create[0].body.title, 'supervisor-audit @ google/gemini-3.8-flash (low)');
   assert.equal(calls.create[0].query.directory, '/workdir');
   assert.equal(calls.create[0].body.parentID, undefined); // FR-004: not parented to a supervised session
   assert.equal(calls.prompt.length, 1);
@@ -620,14 +620,14 @@ test('tool.execute.before blocks reward hacking (--no-verify)', async () => {
 
 /** Env knobs the live audit path reads; pinned clean for determinism. */
 const AUDIT_ENV_NAMES = [
-  'OPENCODE_AUDITOR_MODEL',
-  'OPENCODE_AUDITOR_VARIANT',
-  'OPENCODE_AUDITOR_MAX_REGENERATIONS',
-  'OPENCODE_AUDITOR_STRIP_MODE',
-  'OPENCODE_AUDITOR_BLOCK_REWARD_HACKING',
-  'OPENCODE_AUDITOR_REQUIRE_STEP_REFERENCE_IN_TOOLS',
-  'OPENCODE_AUDITOR_MEMO_MAX_SOLVED_ITEMS',
-  'OPENCODE_AUDITOR_MEMO_MAX_CRITIQUES',
+  'OPENCODE_SUPERVISOR_MODEL',
+  'OPENCODE_SUPERVISOR_VARIANT',
+  'OPENCODE_SUPERVISOR_MAX_REGENERATIONS',
+  'OPENCODE_SUPERVISOR_STRIP_MODE',
+  'OPENCODE_SUPERVISOR_BLOCK_REWARD_HACKING',
+  'OPENCODE_SUPERVISOR_REQUIRE_STEP_REFERENCE_IN_TOOLS',
+  'OPENCODE_SUPERVISOR_MEMO_MAX_SOLVED_ITEMS',
+  'OPENCODE_SUPERVISOR_MEMO_MAX_CRITIQUES',
 ];
 
 /** Saves/deletes the auditor env knobs around `run`, restoring after. */
@@ -752,7 +752,7 @@ function auditHarness(
         },
       },
     },
-    directory: '/tmp/reasoning-audit-hook-test',
+    directory: '/tmp/supervisor-hook-test',
   };
   return { input: input as unknown as PluginInput, calls };
 }
@@ -808,7 +808,7 @@ test('event hook audits a completed reasoning part exactly once and records the 
     // FR-004), scoped to the plugin input's directory.
     assert.equal(calls.create.length, 1);
     assert.equal(calls.prompt.length, 1);
-    assert.equal(calls.create[0].query.directory, '/tmp/reasoning-audit-hook-test');
+    assert.equal(calls.create[0].query.directory, '/tmp/supervisor-hook-test');
 
     // The audit prompt embeds the step and the session goal.
     const promptText = calls.prompt[0].body.parts[0].text;
@@ -939,7 +939,7 @@ test('event hook never rejects when the audit client fails (fail-open)', async (
           delete: async () => ({}),
         },
       },
-      directory: '/tmp/reasoning-audit-hook-test',
+      directory: '/tmp/supervisor-hook-test',
     };
     // Partial SDK stand-in, cast once like the other mocks (review finding #16).
     const hooks = await plugin.server(input as unknown as PluginInput);
@@ -974,7 +974,7 @@ test('event hook steers a minor audit failure through promptAsync', async () => 
     assert.equal(sent.type, 'text');
     assert.equal(sent.synthetic, true);
     // The auditor's critique rides a minimal corrective framing.
-    assert.ok(sent.text.startsWith('[reasoning-audit]'));
+    assert.ok(sent.text.startsWith('[supervisor]'));
     assert.ok(sent.text.includes('Step 1 misstates the capacity bound.'));
 
     // The delivered critique counts against the bound and logs (FR-015).
@@ -988,7 +988,7 @@ test('event hook steers a minor audit failure through promptAsync', async () => 
 
 test('event hook withholds critiques once maxRegenerations is reached', async () => {
   await withCleanAuditEnv(async () => {
-    process.env.OPENCODE_AUDITOR_MAX_REGENERATIONS = '1';
+    process.env.OPENCODE_SUPERVISOR_MAX_REGENERATIONS = '1';
     const { input, calls } = auditHarness([]);
     const hooks = await plugin.server(input);
 
@@ -1080,7 +1080,7 @@ test('event hook aborts the session before delivering a severe critique', async 
 
 test('event hook bounds severe aborts once maxRegenerations is reached', async () => {
   await withCleanAuditEnv(async () => {
-    process.env.OPENCODE_AUDITOR_MAX_REGENERATIONS = '1';
+    process.env.OPENCODE_SUPERVISOR_MAX_REGENERATIONS = '1';
     const { input, calls } = auditHarness([]);
     const hooks = await plugin.server(input);
 
@@ -1182,7 +1182,7 @@ test('event hook still delivers a severe critique when the abort rejects', async
 
 test('event hook consumes the severe slot when delivery fails after the abort', async () => {
   await withCleanAuditEnv(async () => {
-    process.env.OPENCODE_AUDITOR_MAX_REGENERATIONS = '1';
+    process.env.OPENCODE_SUPERVISOR_MAX_REGENERATIONS = '1';
     const { input, calls } = auditHarness(
       ['{"passed":false,"failedStep":1,"severity":"severe","critique":"Step 1 proposes weakening the test gates."}'],
       { promptAsync: new Error('prompt transport down') }
@@ -1391,7 +1391,7 @@ test('tool.execute.after accumulates solved items per session, isolated across s
 
 test('tool.execute.after bounds stored solved items to the memo limits', async () => {
   await withCleanAuditEnv(async () => {
-    process.env.OPENCODE_AUDITOR_MEMO_MAX_SOLVED_ITEMS = '2';
+    process.env.OPENCODE_SUPERVISOR_MEMO_MAX_SOLVED_ITEMS = '2';
     const hooks = await plugin.server(mockPluginInput());
     const sessionID = 'solved-session-bounded';
 
@@ -1411,8 +1411,8 @@ test('tool.execute.after bounds stored solved items to the memo limits', async (
 
 test('critique delivery bounds the stored critique log to the memo limits', async () => {
   await withCleanAuditEnv(async () => {
-    process.env.OPENCODE_AUDITOR_MAX_REGENERATIONS = '3';
-    process.env.OPENCODE_AUDITOR_MEMO_MAX_CRITIQUES = '2';
+    process.env.OPENCODE_SUPERVISOR_MAX_REGENERATIONS = '3';
+    process.env.OPENCODE_SUPERVISOR_MEMO_MAX_CRITIQUES = '2';
     const { input, calls } = auditHarness([]);
     const hooks = await plugin.server(input);
     const sessionID = 'critique-log-bounded';
@@ -1777,7 +1777,7 @@ test('tool.execute.before honors disabled guard checks via configuration', async
   // cannot reach this hook (its precedence is covered by the
   // resolveHookConfig test above).
   await withCleanAuditEnv(async () => {
-    process.env.OPENCODE_AUDITOR_BLOCK_REWARD_HACKING = 'false';
+    process.env.OPENCODE_SUPERVISOR_BLOCK_REWARD_HACKING = 'false';
     const hooks = await plugin.server(mockPluginInput());
     const sessionID = 'guard-config-reward-off';
     sessionState.get(sessionID).verifiedSteps.push('Edit src/a.ts to export the helper.');
@@ -1788,7 +1788,7 @@ test('tool.execute.before honors disabled guard checks via configuration', async
 
   // File-path trace check disabled: an unreferenced path proceeds.
   await withCleanAuditEnv(async () => {
-    process.env.OPENCODE_AUDITOR_REQUIRE_STEP_REFERENCE_IN_TOOLS = 'false';
+    process.env.OPENCODE_SUPERVISOR_REQUIRE_STEP_REFERENCE_IN_TOOLS = 'false';
     const hooks = await plugin.server(mockPluginInput());
     const sessionID = 'guard-config-trace-off';
     sessionState.get(sessionID).verifiedSteps.push('Edit src/a.ts to export the helper.');
@@ -1867,7 +1867,7 @@ test("hooks ignore the plugin's own auditor side sessions (self-suppression)", a
           },
         },
       },
-      directory: '/tmp/reasoning-audit-hook-test',
+      directory: '/tmp/supervisor-hook-test',
     };
     const hooks = await plugin.server(input as unknown as PluginInput);
 
