@@ -73,9 +73,22 @@
   issue numbers in this file. Verify: gh issue view shows both.
   Filed: jflowers/opencode-supervisor#15 and
   unbound-force/website#328.
-- [ ] 5.2 Run /uf.review-council and resolve every REQUEST CHANGES.
+- [x] 5.2 Run /uf.review-council and resolve every REQUEST CHANGES.
   Record the verdict and iteration count here. Verify: consolidated
   verdict is APPROVE or APPROVE WITH ADVISORIES.
+  Two rounds. Round 1: REQUEST CHANGES — 3 HIGH findings
+  (extension-allowlist enforcement blind spot, fence JSON null
+  crash, blanket loader try/catch); fixed in d503bf8 with 13
+  regression tests (150/150 bun + node). Round 2: APPROVE WITH
+  ADVISORIES — 0 HIGH, 0 CRITICAL (adversary, architect, curator,
+  guard, sre all approve; curator clean). Round-2 advisories
+  tracked in #17 comment (glob anchoring spellings, directive-id
+  provenance log, CHANGELOG test-count correction 53/150, README
+  §9 extractor wording, AGENTS.md isolation wording, interface
+  JSDoc, extractArgPaths export, proposal Modified-capability
+  deltas). Artifacts: round 1 consolidated REQUEST CHANGES,
+  round 2 APPROVE WITH ADVISORIES at .uf/artifacts/dispatch/
+  7567d24d-c6d6-47eb-bc09-6be5c6ea1a6c.json.
 - [ ] 5.3 Open the PR opsx/engineer-directives -> main and archive
   the change via the opsx archive workflow after merge. Record the
   PR number here. Verify: PR is open, assigned, and references this
