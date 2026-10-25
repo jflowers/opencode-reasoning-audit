@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-OpenCode supervision middleware (formerly opencode-reasoning-audit) that audits, steers, and interrupts AI reasoning while the agent works. It hooks `event` (completed reasoning parts), `chat.message` (session goal), `tool.execute.before`/`tool.execute.after` (tool guard, solved-items log), and `experimental.chat.system.transform` (supervisor memo); strips persuasive narrative from Chain-of-Thought steps, runs an independent peer audit in a dedicated side session, delivers failed-audit critiques by steering the session via `promptAsync` (interrupting first on severe findings), and blocks reward-hacking tool calls before execution. Roadmap: agent-console tools (reminders, recall, on-demand audit) and engineer directives, all on the same session-state layer.
+OpenCode supervision middleware (formerly opencode-reasoning-audit) that audits, steers, and interrupts AI reasoning while the agent works. It hooks `event` (completed reasoning parts), `chat.message` (session goal), `tool.execute.before``/``tool.execute.after` (tool guard, solved-items log), `experimental.chat.system.transform` (supervisor memo), and the `tool` map (agent console: `remind_me` / `forget_reminder`); strips persuasive narrative from Chain-of-Thought steps, runs an independent peer audit in a dedicated side session, delivers failed-audit critiques by steering the session via `promptAsync` (interrupting first on severe findings), and blocks reward-hacking tool calls before execution. Roadmap: more agent-console tools (recall, report, on-demand audit) and engineer directives, all on the same session-state layer.
 
 - **Type**: OpenCode middleware plugin (TypeScript library)
 - **Runtime**: Bun (primary) / Node 22+ (fallback)
@@ -180,11 +180,11 @@ before writing or reviewing code.
 
 ## Architecture
 
-- **Plugin pattern**: `index.ts` default-exports a `PluginModule` (`{ id, server }`); `server(input)` returns the hook map (`event`, `chat.message`, `tool.execute.before`, `tool.execute.after`, `experimental.chat.system.transform`); all logic lives in pure `src/` modules.
+- **Plugin pattern**: `index.ts` default-exports a `PluginModule` (`{ id, server }`); `server(input)` returns the hook map (`event`, `chat.message`, `tool.execute.before`, `tool.execute.after`, `experimental.chat.system.transform`, plus the `tool` map for agent-console tools); all logic lives in pure `src/` modules.
 - **Audit pipeline**: strip narrative (`stripNarrative`) → deterministic invariants → side-session peer audit (`runPeerAudit` with an injected `invokeModel`) → on failure, critique delivery: steer via `promptAsync` for `minor`, interrupt (`session.abort`) plus steer for `severe`, bounded by `maxRegenerations` per session; passed steps are recorded in a verified trace.
 - **Tool guard**: `verifyToolIntent` blocks reward-hacking patterns and file paths absent from the verified reasoning trace before any tool executes; an empty trace never blocks, and block reasons are actionable (the reason is the model's corrective signal).
 - **Supervisor memo**: `buildMemo` (`src/memo.ts`) formats the goal, reminders, recently solved items, and recent critiques into a bounded memo appended to the system prompt via the experimental transform hook; registration degrades gracefully when the hook is absent.
 - **Agent console**: the plugin registers `remind_me` / `forget_reminder` tools (`Hooks.tool`) backed by `src/reminders.ts`; reminders ride the memo each turn (surviving context compaction), tool results echo the stored text (surviving gateway memo drops), and side sessions get inert results.
 - **Config resolution**: `resolveHookConfig` / `resolveAuditorConfig` apply session → env → default precedence so users can override the auditor model without code changes.
-- **Session state**: module-level Maps keyed by session ID track the goal, verified steps, critique count, solved items, and critique log; in-process only, cleared on dispose.
-- **Dual distribution**: the audit technique ships as middleware (`index.ts`) or a standalone skill (`skills/reasoning-auditor/skill.md`); the middleware adds steer/interrupt critique delivery, the tool guard, and the supervisor memo, which the skill cannot do.
+- **Session state**: module-level Maps keyed by session ID track the goal, verified steps, critique count, solved items, critique log, reminders, and the reminder-id sequence; in-process only, cleared on dispose.
+- **Dual distribution**: the audit technique ships as middleware (`index.ts`) or a standalone skill (`skills/reasoning-auditor/skill.md`); the middleware adds steer/interrupt critique delivery, the tool guard, the supervisor memo, and the agent-console tools, which the skill cannot do.

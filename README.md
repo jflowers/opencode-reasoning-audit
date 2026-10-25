@@ -237,7 +237,7 @@ mkdir -p ~/.config/opencode/skills/reasoning-auditor
 cp skills/reasoning-auditor/skill.md ~/.config/opencode/skills/reasoning-auditor/skill.md
 ```
 
-The skill applies the same audit technique through prompt instructions. The middleware adds what a skill cannot do: automatic critique delivery (steer and interrupt), the tool guard, and the supervisor memo.
+The skill applies the same audit technique through prompt instructions. The middleware adds what a skill cannot do: automatic critique delivery (steer and interrupt), the tool guard, the supervisor memo, and the agent-console tools (`remind_me` / `forget_reminder`).
 
 ### 7.4 Agent Console: `remind_me` / `forget_reminder`
 

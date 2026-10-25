@@ -31,6 +31,13 @@ Spec deltas:
 - 22 new tests in `test/reminders.test.ts` (module, memo integration,
   and tool layer); the full suite passes 97 under Bun and Node.
 
+### Changed
+
+- `MemoLimits` (exported from `src/memo.ts`) gains a required
+  `maxReminders` field — a typed-surface change for direct consumers
+  of the module API (the plugin's own call sites were updated in this
+  change; `MemoInput.reminders` stays optional).
+
 ## [2.0.0] - 2026-10-25
 
 Spec deltas: `openspec/changes/rebrand-supervisor/specs/supervisor-config/spec.md`.
