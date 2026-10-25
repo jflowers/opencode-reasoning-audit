@@ -50,12 +50,17 @@
 
 ## 5. Publication
 
-- [ ] 5.1 File the documentation issue for this user-facing change
+- [x] 5.1 File the documentation issue for this user-facing change
   before merge, naming both gate targets: this repo and
   `unbound-force/website` (constitution cross-repo documentation
-  rule).
+  rule). Filed: #11 (this repo, label documentation) and
+  unbound-force/website#327.
 - [ ] 5.2 Run `/uf.review-council` and resolve all REQUEST CHANGES
-  before PR (AGENTS.md review mandate).
+  before PR (AGENTS.md review mandate). Round 1 verdict: APPROVE WITH
+  ADVISORIES (architect/curator/guard/sre all approved; adversary
+  infra-failed — opus endpoint down, 0 findings, excluded per
+  RD-FR-025). Docs-level findings fixed in the advisory-sweep commit;
+  code-level advisories tracked in #13; blog coverage tracked in #12.
 - [ ] 5.3 Open the PR from `opsx/agent-reminders` to `main`; archive
   the change via the opsx archive workflow after merge.
 
@@ -65,3 +70,7 @@
   on the session-state layer this change extends.
 - Code-level advisories from the rebrand review stay tracked in #9
   (fast-follow; out of scope here).
+- Review-council gate and coverage issues for this change: #11
+  (in-repo docs gate), unbound-force/website#327 (cross-repo docs
+  gate), #12 (blog), #13 (code-level advisories from this change's
+  council).
