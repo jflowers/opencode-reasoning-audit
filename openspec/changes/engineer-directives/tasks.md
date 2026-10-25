@@ -9,25 +9,25 @@
 
 ## 2. Implementation
 
-- [ ] 2.1 Implement src/directives.ts as a pure module: Directive,
+- [x] 2.1 Implement src/directives.ts as a pure module: Directive,
   EnforcementRule, and TriggerRule types; parseDirectives (markdown
   body + supervisor-fenced JSON rules); globToRegExp; compile,
   match, active-set, and bounded-render functions; fixed bounds
   (FR-026, FR-027, FR-032). Verify: module functions are pure and
   covered by 3.1.
-- [ ] 2.2 Extend src/tool-guard.ts: optional compiled-enforcement
+- [x] 2.2 Extend src/tool-guard.ts: optional compiled-enforcement
   parameter on verifyToolIntent, enforcement check between the
   reward-hacking and trace checks, actionable block reasons, and an
   exported extractArgPaths helper (FR-028). Verify: guard tests in
   3.1 and 3.2.
-- [ ] 2.3 Extend src/auditor.ts: optional directivesText parameter
+- [x] 2.3 Extend src/auditor.ts: optional directivesText parameter
   on runPeerAudit and the prompt section after the goal section
   (FR-031). Verify: auditor prompt test in 3.2.
-- [ ] 2.4 Extend src/memo.ts: optional directives input, Directives:
+- [x] 2.4 Extend src/memo.ts: optional directives input, Directives:
   section between goal and reminders, null-check inclusion, bounded
   rendering via src/directives.ts (FR-030). Verify: memo tests in
   3.1 and 3.2.
-- [ ] 2.5 Wire index.ts: server gains the options parameter; private
+- [x] 2.5 Wire index.ts: server gains the options parameter; private
   directive-file loader (fs only here); directive load + compile at
   server start with identity-log directive count; trigger recording
   in tool.execute.before (SessionState += triggeredDirectives);
@@ -37,14 +37,14 @@
 
 ## 3. Tests
 
-- [ ] 3.1 Write test/directives.test.ts module tests: parse (body +
+- [x] 3.1 Write test/directives.test.ts module tests: parse (body +
   fence, malformed skip), glob matching (star, double-star,
   basename), compile (invalid regex skip), bounds (count, text,
   rules), render (budget, truncation note), guard (forbid-path and
   forbid-pattern block, empty never blocks, reason content), memo
   section, active-set filtering. Verify: bun test passes the new
   file.
-- [ ] 3.2 Write integration tests in test/directives.test.ts:
+- [x] 3.2 Write integration tests in test/directives.test.ts:
   temp-dir loader through plugin.server (files load, malformed
   skipped, options.directives merge), trigger recording via
   tool.execute.before (tool name, path glob, blocked-call trigger),
@@ -53,9 +53,9 @@
 
 ## 4. Verification and docs
 
-- [ ] 4.1 Run bun test and node --test on all four test files and
+- [x] 4.1 Run bun test and node --test on all four test files and
   confirm parity. Verify: both suites pass with identical counts.
-- [ ] 4.2 Docs gate: CHANGELOG 2.2.0 entry; README engineer-console
+- [x] 4.2 Docs gate: CHANGELOG 2.2.0 entry; README engineer-console
   section (file format, tuple registration, rule reference, config
   table) and enumeration sweep (hook map, session state, surfaces,
   dual-distribution differentiator, roadmap); AGENTS.md structure

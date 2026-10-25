@@ -3,6 +3,50 @@
 All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [2.2.0] - 2026-10-25
+
+Spec deltas:
+`openspec/changes/engineer-directives/specs/engineer-directives/spec.md`.
+
+### Added
+
+- `engineer-directives` capability spec (FR-026..FR-032): the
+  engineer console — the second console on the supervision plane.
+- Directive sources (FR-026): `.opencode/supervisor/directives/*.md`
+  files from the project directory (markdown advisory body plus a
+  fenced `supervisor` JSON rules block) merged with
+  `options.directives` passed through tuple plugin registration
+  (`[path, options]`). Files load in sorted filename order; no
+  sources means 2.1.0 behavior.
+- Enforcement rules (FR-028): `forbidPath` globs and `forbidPattern`
+  regexes block matching tool calls before execution through the
+  tool guard (between the reward-hacking and trace checks). Block
+  reasons name the directive id, the match, and the advisory text.
+  An empty rule set never blocks.
+- Trigger rules (FR-029): directives with `when` rules (tool name or
+  argument-path glob) surface in the memo just-in-time after a
+  matching tool call — blocked calls still trigger. Unconditioned
+  directives ride the memo always.
+- `Directives:` memo section (FR-030) rendered between the goal and
+  the reminders, bounded by a fixed aggregate render budget.
+- Auditor prompt extension (FR-031): the peer audit receives the
+  directive advisory text and flags steps that violate it.
+- Fixed bounds with fail-open loading (FR-032): 20 directives, 1000
+  characters of advisory text per directive, 10 rules of each kind
+  per directive, 4000-character aggregate render budget. Malformed
+  files and invalid rules are skipped with a warning.
+
+### Changed
+
+- `server` now accepts the plugin options parameter
+  (`server(input, options)`); registering via a tuple
+  (`[path, options]`) passes `options.directives`.
+- `verifyToolIntent` accepts an optional compiled-enforcement
+  argument; `runPeerAudit` an optional directives-text argument —
+  both optional, prior call sites unchanged.
+
+40 new tests (137 total) pass under Bun and Node 22+.
+
 ## [2.1.0] - 2026-10-25
 
 Spec deltas:

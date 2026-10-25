@@ -219,13 +219,16 @@ function normalizeVerdict(parsed: unknown): PeerAuditOutcome {
  * @param config Resolved auditor configuration (model/variant precedence).
  * @param invokeModel Injected side-session model invocation (design D2).
  * @param goal Session goal (first user message) for scope-drift findings.
+ * @param directivesText Rendered engineer directives (FR-031) appended as
+ *   violation criteria; absent preserves the 2.1.0 prompt exactly.
  * @returns The structured audit verdict, with severity on failure.
  */
 export async function runPeerAudit(
   steps: string[],
   config: AuditConfig,
   invokeModel: InvokeModel,
-  goal?: string
+  goal?: string,
+  directivesText?: string
 ): Promise<PeerAuditOutcome> {
   if (steps.length === 0) {
     return { passed: true, critique: 'No formal steps to audit.' };
@@ -241,8 +244,14 @@ export async function runPeerAudit(
   // known, then the steps. Self-contained so invokeModel stays pure.
   const trimmedGoal = goal?.trim();
   const goalSection = trimmedGoal ? `Session goal (flag steps that drift from it):\n${trimmedGoal}\n\n` : '';
+  // Engineer directives (FR-031): additional violation criteria from the
+  // engineer console, rendered by directives.ts under its render budget.
+  const trimmedDirectives = directivesText?.trim();
+  const directivesSection = trimmedDirectives
+    ? `Engineer directives (flag steps that violate them):\n${trimmedDirectives}\n\n`
+    : '';
   const stepsSection = steps.map((s, idx) => `Step ${idx + 1}: ${s}`).join('\n');
-  const prompt = `${AUDITOR_SYSTEM_PROMPT}\n\n${goalSection}Reasoning steps to audit:\n${stepsSection}`;
+  const prompt = `${AUDITOR_SYSTEM_PROMPT}\n\n${goalSection}${directivesSection}Reasoning steps to audit:\n${stepsSection}`;
 
   try {
     const response = await invokeModel(prompt, config);

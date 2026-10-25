@@ -1,10 +1,10 @@
 # opencode-supervisor
 
-An OpenCode middleware plugin that supervises AI agents while they work: it strips persuasive narrative from Chain-of-Thought steps, runs an independent peer audit in a side session, steers or interrupts the supervised session when a step fails, blocks reward-hacking tool calls before they execute, and keeps the agent oriented with a session memo (goal, solved items, recent critiques).
+An OpenCode middleware plugin that supervises AI agents while they work: it strips persuasive narrative from Chain-of-Thought steps, runs an independent peer audit in a side session, steers or interrupts the supervised session when a step fails, blocks reward-hacking and engineer-directive-violating tool calls before they execute, and keeps the agent oriented with a session memo (goal, directives, reminders, solved items, recent critiques).
 
 Formerly `opencode-reasoning-audit` (1.x). The repo and plugin were renamed as the project grows from a reasoning auditor into a supervision plane; see [Section 6.2](#62-migrating-from-1x) for the migration table.
 
-The supervision plane has one automated surface today — the audit loop below — and two consoles: an **agent console** of self-serve tools (`remind_me` / `forget_reminder` ship today, [Section 7.4](#74-agent-console-remind_me--forget_reminder); recall, report, and on-demand audit on the roadmap) and an **engineer console** of directive files ([Section 10](#10-roadmap-two-consoles-on-the-supervision-plane)), all writing one shared session-state layer.
+The supervision plane has one automated surface — the audit loop below — and two consoles: an **agent console** of self-serve tools (`remind_me` / `forget_reminder` ship today, [Section 7.4](#74-agent-console-remind_me--forget_reminder); recall, report, and on-demand audit on the roadmap) and an **engineer console** of directive files (ships today — [Section 7.5](#75-engineer-console-directives)), all writing one shared session-state layer.
 
 ---
 
@@ -23,8 +23,8 @@ This plugin implements **Process Supervision** and **Automated Self-Correction**
 
 Two more surfaces complete the supervision:
 
-- **Tool guard** (`tool.execute.before`): before any tool runs, the plugin blocks reward-hacking patterns and file paths that do not appear in the verified trace. A block throws, so the model receives the reason as a tool error it can act on. An empty trace never blocks.
-- **Supervisor memo** (`experimental.chat.system.transform`): before each model call, the plugin appends a bounded memo — session goal, reminders, recently solved items, recent critiques — to the system prompt. This is a plugin-side append: whether the model actually receives the memo depends on the transport honoring pushed secondary system messages (see Section 9).
+- **Tool guard** (`tool.execute.before`): before any tool runs, the plugin blocks reward-hacking patterns, engineer-directive violations (forbidden paths and command patterns), and file paths that do not appear in the verified trace. A block throws, so the model receives the reason as a tool error it can act on. An empty trace or rule set never blocks.
+- **Supervisor memo** (`experimental.chat.system.transform`): before each model call, the plugin appends a bounded memo — session goal, active engineer directives, reminders, recently solved items, recent critiques — to the system prompt. This is a plugin-side append: whether the model actually receives the memo depends on the transport honoring pushed secondary system messages (see Section 9).
 
 The supervised agent also gets self-serve tools (`Hooks.tool`): `remind_me` / `forget_reminder` keep durable facts — dead ends, environment quirks, decisions, user constraints — in the supervision state, where they ride the memo and survive context compaction (Section 7.4).
 
@@ -72,13 +72,13 @@ In software engineering, coding agents frequently make subtle logic errors or ta
 
 ### 5.1 Hook Map
 
-The plugin entry (`index.ts`) default-exports a `PluginModule` (`{ id, server }`, id `opencode-supervisor`); `server(input)` returns this hook map:
+The plugin entry (`index.ts`) default-exports a `PluginModule` (`{ id, server }`, id `opencode-supervisor`); `server(input, options)` returns this hook map (options carry engineer directives through tuple registration — Section 7.5):
 
 | Hook | Purpose |
 | :--- | :--- |
 | `event` | Observes completed reasoning parts (`message.part.updated`), deduplicates them, strips narrative, runs the invariants and the side-session peer audit, records passed steps in the verified trace, and routes failures to critique delivery. |
 | `chat.message` | Captures the first user message of the session as the goal. The goal is never replaced. |
-| `tool.execute.before` | Tool guard: blocks reward-hacking tool calls and file paths absent from the verified trace (never blocks when the trace is empty). |
+| `tool.execute.before` | Tool guard: blocks reward-hacking tool calls, engineer-directive violations, and file paths absent from the verified trace (never blocks when the trace is empty); records directive triggers. |
 | `tool.execute.after` | Appends a solved item (tool name + short outcome) to a bounded log. |
 | `tool` | Agent console: registers the `remind_me` and `forget_reminder` tools the supervised agent can call to keep or clear durable reminders (Section 7.4). |
 | `experimental.chat.system.transform` | Appends the supervisor memo to the system prompt. Degrades gracefully (memo-less operation) when the hook is absent. |
@@ -99,11 +99,12 @@ The peer audit runs in a dedicated side session created for each audit through t
 | `index.ts` | Hook layer: registers the hooks, owns the per-session state Maps, resolves configuration, drives the auditor side session and critique delivery. |
 | `src/stripper.ts` | Narrative stripping (`code_and_math` / `balanced` / `strict`). |
 | `src/auditor.ts` | Peer audit: deterministic invariants, injected-model LLM audit, severity classification, goal-aware prompt, model/variant config resolution. |
-| `src/tool-guard.ts` | Tool intent verification: reward-hacking patterns and the verified-trace file-path check, with actionable block reasons. |
-| `src/memo.ts` | Pure memo builder: bounded goal / reminders / solved-items / critiques sections; produces no memo when there is nothing to show. |
+| `src/tool-guard.ts` | Tool intent verification: reward-hacking patterns, engineer-directive enforcement, and the verified-trace file-path check, with actionable block reasons. |
+| `src/memo.ts` | Pure memo builder: bounded goal / directives / reminders / solved-items / critiques sections; produces no memo when there is nothing to show. |
 | `src/reminders.ts` | Agent-console reminders: pure storage (add, clear, prepare text) and memo rendering for the `remind_me` / `forget_reminder` tools. |
+| `src/directives.ts` | Engineer directives: pure parsing (markdown + rules fence), glob compilation, enforcement evaluation, trigger matching, and bounded rendering. |
 
-`src/` modules are pure and testable — they import no OpenCode APIs. Session state and OpenCode hooks live only in `index.ts`. State (goal, verified steps, critique count, solved items, critique log, reminders) is held in module-level Maps keyed by session ID and dies with the opencode process; nothing is persisted.
+`src/` modules are pure and testable — they import no OpenCode APIs. Session state and OpenCode hooks live only in `index.ts`. State (goal, verified steps, critique count, solved items, critique log, reminders, triggered directive ids) is held in module-level Maps keyed by session ID and dies with the opencode process; nothing is persisted.
 
 ---
 
@@ -237,7 +238,7 @@ mkdir -p ~/.config/opencode/skills/reasoning-auditor
 cp skills/reasoning-auditor/skill.md ~/.config/opencode/skills/reasoning-auditor/skill.md
 ```
 
-The skill applies the same audit technique through prompt instructions. The middleware adds what a skill cannot do: automatic critique delivery (steer and interrupt), the tool guard, the supervisor memo, and the agent-console tools (`remind_me` / `forget_reminder`).
+The skill applies the same audit technique through prompt instructions. The middleware adds what a skill cannot do: automatic critique delivery (steer and interrupt), the tool guard with engineer-directive enforcement, the supervisor memo, the agent-console tools (`remind_me` / `forget_reminder`), and the engineer console (directive files and options).
 
 ### 7.4 Agent Console: `remind_me` / `forget_reminder`
 
@@ -278,6 +279,66 @@ Behavior details:
 
 ---
 
+### 7.5 Engineer Console: Directives
+
+Engineers supervise through directive files and plugin options. A
+directive is advisory text plus optional machine rules:
+
+- **Advisory text** (the markdown body) rides the supervisor memo and
+  becomes an audit criterion — the peer auditor flags steps that
+  violate it. Unconditioned directives ride the memo every turn; a
+  directive with `when` rules surfaces only after a tool call matches.
+- **`enforce` rules** block tool calls before execution:
+  `forbidPath` (glob: `*`, `**`, `?`) and `forbidPattern` (regex,
+  case-insensitive). The block reason names the directive, the match,
+  and the advisory text, so the model can correct course. An empty
+  rule set never blocks.
+- **`when` rules** surface a directive just-in-time: `tool` (tool
+  name, case-insensitive) or `path` (argument-path glob). Blocked
+  calls still record the trigger.
+
+Directive files live in `.opencode/supervisor/directives/*.md` —
+the markdown body is the advisory text, and a fenced `supervisor`
+code block carries the rules as JSON:
+
+````markdown
+Never read, print, or copy secret material. Secrets live in the
+vault, not the repo. If a task seems to require a secret, ask the
+engineer instead.
+
+```supervisor
+{
+  "enforce": [{ "forbidPath": "secrets/**" }],
+  "when": [{ "tool": "bash" }, { "path": "src/crypto/**" }]
+}
+```
+````
+
+Directives can also be registered through tuple plugin registration
+(`opencode.json`):
+
+```json
+{
+  "plugin": [
+    ["/absolute/path/to/opencode-supervisor", {
+      "directives": [{ "id": "prefer-bun", "text": "Run tests with bun, not node." }]
+    }]
+  ]
+}
+```
+
+File directives load first (sorted by filename), then option
+directives append. Bounds are fixed, not configurable: at most 20
+directives (extras dropped with a warning), 1000 characters of
+advisory text per directive, 10 rules of each kind per directive,
+and a 4000-character aggregate render budget for the memo section.
+Malformed files and invalid rules are skipped with a warning —
+loading fails open, and no directives configured means 2.1.0
+behavior. Directives load once at plugin start; there is no hot
+reload.
+
+---
+
 ## 8. Tested Versions
 
 - OpenCode runtime: **1.19.0**
@@ -295,15 +356,16 @@ The memo uses the `experimental.chat.system.transform` hook. Experimental hooks 
 - Supervision state is in-process only. Restarting OpenCode clears the goal, the verified trace, and the logs.
 - The verified-trace file-path check is best-effort: a tool call that races an in-flight audit sees the partial trace (an empty trace never blocks).
 - A blocked tool surfaces to the model as an error tool result, so the model may retry the call (bounded by OpenCode's doom-loop check).
+- Directive `forbidPath` globs match paths the guard can extract from tool arguments — the same best-effort path extraction (and extension set) as the verified-trace check. Directives load once at plugin start; there is no hot reload.
 
 ---
 
 ## 10. Roadmap: Two Consoles on the Supervision Plane
 
-The audit loop above is the automated pillar; the agent console's first slice ships in 2.1.0. Both consoles write the same session-state layer rendered through the memo:
+The audit loop above is the automated pillar; both consoles now ship — the agent console's first slice in 2.1.0, the engineer console in 2.2.0. Both write the same session-state layer rendered through the memo:
 
 1. **Agent console (self-serve tools)**: first slice shipped — `remind_me` / `forget_reminder` for durable, compaction-proof reminders ("this project needs bash 4.5 for the test suite"; Section 7.4). Remaining: recall, report, and on-demand-audit tools on the same state layer.
-2. **Engineer console (directives)**: predefined instruction files (`.opencode/supervisor/directives/*.md`) that meta-prompt engineers use to guide and oversee the agent — advisory text injected into the memo, with enforceable rules (forbidden paths, forbidden command patterns) wired into the tool guard.
+2. **Engineer console (directives)**: shipped — directive files and tuple-registered options (`.opencode/supervisor/directives/*.md`, `options.directives`) with advisory memo surfacing, `when` triggers, `enforce` rules wired into the tool guard, and audit criteria (Section 7.5). Remaining: more rule kinds (for example approve-gates, required reviewers) on the same loader.
 
 ---
 
