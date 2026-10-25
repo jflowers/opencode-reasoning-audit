@@ -61,8 +61,13 @@
   change before merge, naming both gate targets: this repo
   (AGENTS.md documentation gate — #6) and `unbound-force/website`
   (constitution cross-repo documentation rule — #326).
-- [ ] 4.3 Run `/uf.review-council` and resolve all REQUEST
+- [x] 4.3 Run `/uf.review-council` and resolve all REQUEST
   CHANGES before PR (AGENTS.md review mandate).
+  Round 1 (beb882a): REQUEST CHANGES — all findings fixed in
+  f563c7b. Round 2 (f563c7b): APPROVE WITH ADVISORIES;
+  code-level advisories tracked in #9, stale-issue sweep
+  recorded below. divisor-adversary infra-failed both rounds
+  (opus endpoint down, 0 findings).
 - [ ] 4.4 Open the PR from `opsx/rebrand-supervisor` to `main`;
   archive the change via the opsx archive workflow after merge.
 
@@ -73,3 +78,6 @@
   this PR merges.
 - Content: blog issue #7 tracks the 2.0 rename announcement;
   advisory #8 tracks the deferred legacy-env detect-and-warn.
+- Advisory sweep (round 2): tutorial issue #4 retitled and
+  rescoped to the 2.0 config surface; code-level review
+  advisories tracked in #9.
