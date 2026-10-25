@@ -89,10 +89,13 @@
   deltas). Artifacts: round 1 consolidated REQUEST CHANGES,
   round 2 APPROVE WITH ADVISORIES at .uf/artifacts/dispatch/
   7567d24d-c6d6-47eb-bc09-6be5c6ea1a6c.json.
-- [ ] 5.3 Open the PR opsx/engineer-directives -> main and archive
+- [x] 5.3 Open the PR opsx/engineer-directives -> main and archive
   the change via the opsx archive workflow after merge. Record the
   PR number here. Verify: PR is open, assigned, and references this
   change.
+  PR: jflowers/opencode-supervisor#18 (open, assigned jflowers,
+  zero closing-issue references — follow-ups are referenced, not
+  closed). Archive pending post-merge.
 
 ## Workflow follow-up
 
