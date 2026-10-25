@@ -4,7 +4,8 @@
  * Thin `@opencode-ai/plugin` module (design D1): `server(input)` returns
  * hooks that observe completed reasoning parts (`event`), capture the
  * session goal (`chat.message`), guard tool execution
- * (`tool.execute.before` / `tool.execute.after`), and inject the
+ * (`tool.execute.before` / `tool.execute.after`), offer the agent
+ * self-serve reminder tools (`tool`, FR-020/FR-021), and inject the
  * supervision memo (`experimental.chat.system.transform`). All audit
  * logic lives in the pure `src/` modules; this file owns the per-session
  * state (design D4), config resolution (session plugin config →
@@ -19,7 +20,7 @@
  * (spike 1.4 — file-source plugins must carry `id`).
  */
 
-import type { Hooks, PluginInput, PluginModule } from '@opencode-ai/plugin';
+import { tool, type Hooks, type PluginInput, type PluginModule } from '@opencode-ai/plugin';
 import {
   resolveAuditorConfig,
   runPeerAudit,
@@ -30,6 +31,12 @@ import {
 import { stripNarrative } from './src/stripper.ts';
 import { verifyToolIntent, type ToolVerificationResult } from './src/tool-guard.ts';
 import { buildMemo, DEFAULT_MEMO_LIMITS, type CritiqueRecord, type MemoLimits, type SolvedItem } from './src/memo.ts';
+import {
+  addReminder,
+  clearReminder,
+  prepareReminderText,
+  type Reminder,
+} from './src/reminders.ts';
 
 // ── Configuration (session plugin config → environment → defaults) ──
 
@@ -40,6 +47,7 @@ const ENV_BLOCK_REWARD_HACKING = 'OPENCODE_SUPERVISOR_BLOCK_REWARD_HACKING';
 const ENV_REQUIRE_STEP_REFERENCE = 'OPENCODE_SUPERVISOR_REQUIRE_STEP_REFERENCE_IN_TOOLS';
 const ENV_MEMO_MAX_SOLVED_ITEMS = 'OPENCODE_SUPERVISOR_MEMO_MAX_SOLVED_ITEMS';
 const ENV_MEMO_MAX_CRITIQUES = 'OPENCODE_SUPERVISOR_MEMO_MAX_CRITIQUES';
+const ENV_MEMO_MAX_REMINDERS = 'OPENCODE_SUPERVISOR_MEMO_MAX_REMINDERS';
 
 /**
  * Hook-layer configuration: the auditor's `AuditConfig` plus the memo
@@ -47,7 +55,7 @@ const ENV_MEMO_MAX_CRITIQUES = 'OPENCODE_SUPERVISOR_MEMO_MAX_CRITIQUES';
  * precedence session plugin config → environment → `pluginConfig`.
  */
 export interface HookConfig extends AuditConfig {
-  /** Caps on memo solved items and critiques (FR-017). */
+  /** Caps on memo solved items, critiques, and reminders (FR-017, FR-023). */
   memoLimits: MemoLimits;
 }
 
@@ -74,7 +82,7 @@ export const pluginConfig: HookConfig = {
  * build. `package.json` cannot be imported from here without a build
  * step, so the constant is the source of truth for the log prefix.
  */
-const PLUGIN_VERSION = '2.0.0';
+const PLUGIN_VERSION = '2.1.0';
 
 /** Emits the module-identity log line once per process (plugin load = first `server()` invocation, spike 1.4). */
 let identityLogged = false;
@@ -161,6 +169,8 @@ export function resolveHookConfig(session?: SessionWithPluginConfig): HookConfig
         pickNumber(memoOverrides.maxSolvedItems) ?? envNumber(ENV_MEMO_MAX_SOLVED_ITEMS) ?? pluginConfig.memoLimits.maxSolvedItems,
       maxCritiques:
         pickNumber(memoOverrides.maxCritiques) ?? envNumber(ENV_MEMO_MAX_CRITIQUES) ?? pluginConfig.memoLimits.maxCritiques,
+      maxReminders:
+        pickNumber(memoOverrides.maxReminders) ?? envNumber(ENV_MEMO_MAX_REMINDERS) ?? pluginConfig.memoLimits.maxReminders,
     },
   };
 }
@@ -179,6 +189,10 @@ export interface SessionState {
   solvedItems: SolvedItem[];
   /** Delivered and withheld critiques (FR-015). */
   critiqueLog: CritiqueRecord[];
+  /** Agent-set reminders (FR-020), stored bounded to the most recent (FR-023). */
+  reminders: Reminder[];
+  /** Monotonic reminder-id sequence (design D3): ids are `r<n>` and never recycled. */
+  reminderSeq: number;
   /**
    * Reasoning-part identities already observed, keyed
    * `sessionID:messageID:partID` (spike 1.1), so duplicate audits are
@@ -197,6 +211,8 @@ function emptySessionState(): SessionState {
     critiqueCount: 0,
     solvedItems: [],
     critiqueLog: [],
+    reminders: [],
+    reminderSeq: 0,
     seenParts: new Set(),
   };
 }
@@ -989,6 +1005,93 @@ const server = async (input: PluginInput): Promise<Hooks> => {
     },
 
     /**
+     * Agent console, first slice (FR-020/FR-021; design D1): self-serve
+     * tools the supervised agent can call. The descriptions are
+     * meta-prompts — they tell the agent WHEN a reminder earns its
+     * place: facts that must survive context compaction and stay in
+     * view every turn. State flows through the same session-state
+     * layer (design D4) the memo reads, and results echo the stored
+     * text so the reminder lands even where the memo cannot (D7 —
+     * gateways may drop pushed system messages; the tool result is
+     * in-conversation). Side sessions (FR-024) get an inert result,
+     * never state. The execute bodies are pure state operations: no
+     * network, no async infrastructure, so no fail-open wrapper is
+     * needed.
+     */
+    tool: {
+      remind_me: tool({
+        description:
+          'Store a durable reminder for this session. Use it for facts that must survive context compaction and stay in view every turn: ' +
+          'dead ends ("do not retry X — it fails because Y"), environment quirks ("use bash 4.5 for the test suite, other versions error"), ' +
+          'decisions already made, and constraints the user stated mid-session. ' +
+          'The reminder reappears in the supervisor memo each turn; clear it with forget_reminder when it no longer applies.',
+        args: {
+          text: tool.schema.string().describe('The fact to remember, stated as a constraint or instruction to future turns.'),
+        },
+        execute: async (args, context) => {
+          // FR-024: the plugin's own side sessions are audit machinery —
+          // inert result, no state, never an error.
+          if (isAuditorSessionId(context.sessionID)) {
+            return 'Reminder tools are not available in supervisor side sessions.';
+          }
+          // FR-025: whitespace-only text is rejected with an actionable
+          // message; over-length text truncates at the fixed ceiling.
+          const prepared = prepareReminderText(args.text);
+          if (!prepared.ok) {
+            return prepared.error;
+          }
+          const state = sessionState.get(context.sessionID);
+          // D3: monotonic per-session sequence — ids are unique and never
+          // recycled, so a stale forget_reminder can never hit a new
+          // reminder that reused an old id.
+          state.reminderSeq += 1;
+          const id = `r${state.reminderSeq}`;
+          // FR-023: storage is bounded to the most recent reminders at
+          // append time (the render-side bound lives in buildMemo).
+          state.reminders = addReminder(
+            state.reminders,
+            { id, text: prepared.text, addedAt: new Date().toISOString() },
+            resolveHookConfig().memoLimits.maxReminders
+          );
+          // FR-020: the result echoes the stored text and id — the
+          // in-conversation delivery that survives gateway memo drops (D7).
+          const truncationNote = prepared.truncated ? ' (truncated to 2000 characters)' : '';
+          return (
+            `Reminder ${id} stored: ${prepared.text}${truncationNote}. ` +
+            `It reappears in the supervisor memo each turn; clear it with forget_reminder ${id} when it no longer applies.`
+          );
+        },
+      }),
+      forget_reminder: tool({
+        description:
+          'Clear a stored reminder by its id (e.g. r1) once it no longer applies — stale reminders crowd the memo. ' +
+          'Current ids appear in the supervisor memo\'s Reminders section and in every remind_me result.',
+        args: {
+          id: tool.schema.string().describe('The reminder id to clear, e.g. r1.'),
+        },
+        execute: async (args, context) => {
+          if (isAuditorSessionId(context.sessionID)) {
+            return 'Reminder tools are not available in supervisor side sessions.';
+          }
+          const state = sessionState.get(context.sessionID);
+          const next = clearReminder(state.reminders, args.id);
+          if (next === null) {
+            // FR-021: an unknown id yields an actionable result — the
+            // current ids, so the caller can re-issue against a real one
+            // (the same corrective-signal philosophy as FR-012).
+            if (state.reminders.length === 0) {
+              return `No reminder matches "${args.id}" — the session has no reminders.`;
+            }
+            const ids = state.reminders.map((reminder) => reminder.id).join(', ');
+            return `No reminder matches "${args.id}" — current reminders: ${ids}.`;
+          }
+          state.reminders = next;
+          return `Reminder ${args.id} cleared.`;
+        },
+      }),
+    },
+
+    /**
      * Dispose (design D4): supervision state is in-process only; clear
      * it when the plugin unloads so a re-register starts clean.
      */
@@ -1017,7 +1120,12 @@ const server = async (input: PluginInput): Promise<Hooks> => {
         return;
       }
       const memo = buildMemo(
-        { goal: state.goal, solvedItems: state.solvedItems, critiques: state.critiqueLog },
+        {
+          goal: state.goal,
+          reminders: state.reminders,
+          solvedItems: state.solvedItems,
+          critiques: state.critiqueLog,
+        },
         resolveHookConfig().memoLimits
       );
       // Nothing to show (no goal, no log entries): the system prompt

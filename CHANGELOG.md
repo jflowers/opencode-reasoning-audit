@@ -3,6 +3,34 @@
 All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [2.1.0] - 2026-10-25
+
+Spec deltas:
+`openspec/changes/agent-reminders/specs/agent-reminders/spec.md`.
+
+### Added
+
+- `agent-reminders` capability spec (FR-020..FR-025): the agent
+  console's first slice is now a spec'd requirement surface.
+- `remind_me` / `forget_reminder` tools registered on the plugin hook
+  map (`Hooks.tool`) — the primary agent can store durable reminders
+  (dead ends, environment quirks, decisions, user constraints) and
+  clear them by id. Tool descriptions are meta-prompts telling the
+  agent when to use them; results echo the stored text, so a reminder
+  survives gateway memo drops. Supervisor side sessions get inert
+  results and never write state (FR-024).
+- `Reminders:` section in the supervisor memo — reminders ride the
+  memo each turn (surviving context compaction), most recent last,
+  bounded by the new `memoLimits.maxReminders`.
+- `OPENCODE_SUPERVISOR_MEMO_MAX_REMINDERS` (default 10) configuration
+  knob, resolved session plugin config → environment → default
+  (FR-023).
+- Text hygiene on reminder storage: whitespace-only text is rejected
+  with an actionable message; text over 2000 characters is truncated
+  and the result says so (FR-025).
+- 22 new tests in `test/reminders.test.ts` (module, memo integration,
+  and tool layer); the full suite passes 97 under Bun and Node.
+
 ## [2.0.0] - 2026-10-25
 
 Spec deltas: `openspec/changes/rebrand-supervisor/specs/supervisor-config/spec.md`.

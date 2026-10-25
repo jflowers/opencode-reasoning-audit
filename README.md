@@ -4,7 +4,7 @@ An OpenCode middleware plugin that supervises AI agents while they work: it stri
 
 Formerly `opencode-reasoning-audit` (1.x). The repo and plugin were renamed as the project grows from a reasoning auditor into a supervision plane; see [Section 6.2](#62-migrating-from-1x) for the migration table.
 
-The supervision plane has one automated surface today — the audit loop below — and two consoles on the roadmap (Section 10): an **agent console** of self-serve tools (`remind_me` and friends) and an **engineer console** of directive files, all writing one shared session-state layer.
+The supervision plane has one automated surface today — the audit loop below — and two consoles: an **agent console** of self-serve tools (`remind_me` / `forget_reminder` ship today, [Section 7.4](#74-agent-console-remind_me--forget_reminder); recall, report, and on-demand audit on the roadmap) and an **engineer console** of directive files ([Section 10](#10-roadmap-two-consoles-on-the-supervision-plane)), all writing one shared session-state layer.
 
 ---
 
@@ -24,7 +24,9 @@ This plugin implements **Process Supervision** and **Automated Self-Correction**
 Two more surfaces complete the supervision:
 
 - **Tool guard** (`tool.execute.before`): before any tool runs, the plugin blocks reward-hacking patterns and file paths that do not appear in the verified trace. A block throws, so the model receives the reason as a tool error it can act on. An empty trace never blocks.
-- **Supervisor memo** (`experimental.chat.system.transform`): before each model call, the plugin appends a bounded memo — session goal, recently solved items, recent critiques — to the system prompt. This is a plugin-side append: whether the model actually receives the memo depends on the transport honoring pushed secondary system messages (see Section 9).
+- **Supervisor memo** (`experimental.chat.system.transform`): before each model call, the plugin appends a bounded memo — session goal, reminders, recently solved items, recent critiques — to the system prompt. This is a plugin-side append: whether the model actually receives the memo depends on the transport honoring pushed secondary system messages (see Section 9).
+
+The supervised agent also gets self-serve tools (`Hooks.tool`): `remind_me` / `forget_reminder` keep durable facts — dead ends, environment quirks, decisions, user constraints — in the supervision state, where they ride the memo and survive context compaction (Section 7.4).
 
 ---
 
@@ -78,6 +80,7 @@ The plugin entry (`index.ts`) default-exports a `PluginModule` (`{ id, server }`
 | `chat.message` | Captures the first user message of the session as the goal. The goal is never replaced. |
 | `tool.execute.before` | Tool guard: blocks reward-hacking tool calls and file paths absent from the verified trace (never blocks when the trace is empty). |
 | `tool.execute.after` | Appends a solved item (tool name + short outcome) to a bounded log. |
+| `tool` | Agent console: registers the `remind_me` and `forget_reminder` tools the supervised agent can call to keep or clear durable reminders (Section 7.4). |
 | `experimental.chat.system.transform` | Appends the supervisor memo to the system prompt. Degrades gracefully (memo-less operation) when the hook is absent. |
 | `dispose` | Clears all in-process session state. |
 
@@ -97,9 +100,10 @@ The peer audit runs in a dedicated side session created for each audit through t
 | `src/stripper.ts` | Narrative stripping (`code_and_math` / `balanced` / `strict`). |
 | `src/auditor.ts` | Peer audit: deterministic invariants, injected-model LLM audit, severity classification, goal-aware prompt, model/variant config resolution. |
 | `src/tool-guard.ts` | Tool intent verification: reward-hacking patterns and the verified-trace file-path check, with actionable block reasons. |
-| `src/memo.ts` | Pure memo builder: bounded goal / solved-items / critiques sections; produces no memo when there is nothing to show. |
+| `src/memo.ts` | Pure memo builder: bounded goal / reminders / solved-items / critiques sections; produces no memo when there is nothing to show. |
+| `src/reminders.ts` | Agent-console reminders: pure storage (add, clear, prepare text) and memo rendering for the `remind_me` / `forget_reminder` tools. |
 
-`src/` modules are pure and testable — they import no OpenCode APIs. Session state and OpenCode hooks live only in `index.ts`. State (goal, verified steps, critique count, solved items, critique log) is held in module-level Maps keyed by session ID and dies with the opencode process; nothing is persisted.
+`src/` modules are pure and testable — they import no OpenCode APIs. Session state and OpenCode hooks live only in `index.ts`. State (goal, verified steps, critique count, solved items, critique log, reminders) is held in module-level Maps keyed by session ID and dies with the opencode process; nothing is persisted.
 
 ---
 
@@ -130,6 +134,7 @@ Settings resolve in order of precedence at runtime:
 | `requireStepReferenceInTools` | `OPENCODE_SUPERVISOR_REQUIRE_STEP_REFERENCE_IN_TOOLS` | `true` | When `true`, the tool guard blocks tool calls whose file-path arguments do not appear in the verified reasoning trace. Never blocks when the trace is empty. |
 | `memoLimits.maxSolvedItems` | `OPENCODE_SUPERVISOR_MEMO_MAX_SOLVED_ITEMS` | `5` | Cap on solved items kept in state and shown in the memo. |
 | `memoLimits.maxCritiques` | `OPENCODE_SUPERVISOR_MEMO_MAX_CRITIQUES` | `3` | Cap on critiques kept in state and shown in the memo. |
+| `memoLimits.maxReminders` | `OPENCODE_SUPERVISOR_MEMO_MAX_REMINDERS` | `10` | Cap on reminders kept in state and shown in the memo (the most recent are kept). |
 
 Environment variable values: booleans accept exactly `true` or `false`; numbers must be non-negative; `stripMode` must be one of the three mode names. Invalid values fall through to the next precedence tier.
 
@@ -142,6 +147,7 @@ export OPENCODE_SUPERVISOR_BLOCK_REWARD_HACKING=true
 export OPENCODE_SUPERVISOR_REQUIRE_STEP_REFERENCE_IN_TOOLS=true
 export OPENCODE_SUPERVISOR_MEMO_MAX_SOLVED_ITEMS=5
 export OPENCODE_SUPERVISOR_MEMO_MAX_CRITIQUES=3
+export OPENCODE_SUPERVISOR_MEMO_MAX_REMINDERS=10
 ```
 
 ### 6.1 Understanding `stripMode`
@@ -186,7 +192,7 @@ bun install
 # 2. Run the unit tests (works with Bun or Node 22+)
 bun test
 # Or with Node:
-node --test test/audit.test.ts test/memo.test.ts
+node --test test/audit.test.ts test/memo.test.ts test/reminders.test.ts
 
 # 3. Register the plugin with OpenCode (one of the options below)
 
@@ -233,6 +239,43 @@ cp skills/reasoning-auditor/skill.md ~/.config/opencode/skills/reasoning-auditor
 
 The skill applies the same audit technique through prompt instructions. The middleware adds what a skill cannot do: automatic critique delivery (steer and interrupt), the tool guard, and the supervisor memo.
 
+### 7.4 Agent Console: `remind_me` / `forget_reminder`
+
+The plugin registers two tools with OpenCode (`Hooks.tool`), so the
+primary agent can call them like any other tool. This is the agent
+console's first slice: self-serve supervision state.
+
+**`remind_me`** stores a durable fact for the rest of the session:
+
+- Dead ends: "the flaky import always fails — do not retry it; use the
+  direct path instead."
+- Environment quirks: "this project needs bash 4.5 to run the test
+  suite; otherwise there are errors."
+- Decisions: "we chose the streaming parser over the DOM parser."
+- User constraints: "never touch the generated/ directory."
+
+A stored reminder re-enters context two ways: a `Reminders:` section in
+the supervisor memo (re-injected every turn, so reminders survive
+context compaction) and the tool result itself (which echoes the stored
+text, so the reminder lands even when the gateway drops the memo —
+see Section 9).
+
+Each reminder gets a stable id (`r1`, `r2`, ...). Ids are never
+recycled: forgetting `r1` and adding another reminder yields `r3`.
+
+**`forget_reminder`** clears a reminder by id (`forget_reminder r1`).
+An unknown id returns an actionable message listing the current ids.
+
+Behavior details:
+
+- Storage is bounded: the most recent `memoLimits.maxReminders`
+  reminders are kept (default 10;
+  `OPENCODE_SUPERVISOR_MEMO_MAX_REMINDERS`).
+- Whitespace-only text is rejected with an actionable message; text
+  longer than 2000 characters is truncated and the result says so.
+- Supervisor side sessions (audit traffic) get inert results and never
+  read or write reminder state.
+
 ---
 
 ## 8. Tested Versions
@@ -248,7 +291,7 @@ The memo uses the `experimental.chat.system.transform` hook. Experimental hooks 
 
 - The critique is delivered as a user-role message (synthetic-marked). The V1 OpenCode client exposes no delivery option; steer pickup is run-loop behavior verified against 1.19.0.
 - Severe interrupts are bounded by `maxRegenerations` (default 2) per session: once the bound is spent, a severe finding neither interrupts nor delivers — it is recorded as withheld. The tool guard's reward-hacking block remains active independent of the bound.
-- The supervisor memo is appended to the system prompt by the plugin, but tested model gateways (enmaas, OpenRouter) drop pushed secondary system messages — memo content may never reach the model depending on the gateway (evidence: the smoke test recorded in `openspec/changes/audit-supervisor/design.md`).
+- The supervisor memo is appended to the system prompt by the plugin, but tested model gateways (enmaas, OpenRouter) drop pushed secondary system messages — memo content may never reach the model depending on the gateway (evidence: the smoke test recorded in `openspec/changes/audit-supervisor/design.md`). Reminders carry a second channel: the `remind_me` tool result echoes the stored text into the conversation, so the reminder is seen even when the memo is not.
 - Supervision state is in-process only. Restarting OpenCode clears the goal, the verified trace, and the logs.
 - The verified-trace file-path check is best-effort: a tool call that races an in-flight audit sees the partial trace (an empty trace never blocks).
 - A blocked tool surfaces to the model as an error tool result, so the model may retry the call (bounded by OpenCode's doom-loop check).
@@ -257,9 +300,9 @@ The memo uses the `experimental.chat.system.transform` hook. Experimental hooks 
 
 ## 10. Roadmap: Two Consoles on the Supervision Plane
 
-The audit loop above is the automated pillar. Two more surfaces are planned, all writing the same session-state layer rendered through the memo:
+The audit loop above is the automated pillar; the agent console's first slice ships in 2.1.0. Both consoles write the same session-state layer rendered through the memo:
 
-1. **Agent console (self-serve tools)**: plugin-registered tools the primary agent can call — `remind_me` / `forget_reminder` for durable, compaction-proof reminders ("this project needs bash 4.5 for the test suite"), plus recall, report, and on-demand-audit tools. Reminders live in plugin state and re-enter context through the memo, so they survive context compaction.
+1. **Agent console (self-serve tools)**: first slice shipped — `remind_me` / `forget_reminder` for durable, compaction-proof reminders ("this project needs bash 4.5 for the test suite"; Section 7.4). Remaining: recall, report, and on-demand-audit tools on the same state layer.
 2. **Engineer console (directives)**: predefined instruction files (`.opencode/supervisor/directives/*.md`) that meta-prompt engineers use to guide and oversee the agent — advisory text injected into the memo, with enforceable rules (forbidden paths, forbidden command patterns) wired into the tool guard.
 
 ---

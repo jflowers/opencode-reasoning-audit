@@ -9,39 +9,39 @@
 
 ## 2. Implementation
 
-- [ ] 2.1 [P] Implement `src/reminders.ts` as a pure module:
+- [x] 2.1 [P] Implement `src/reminders.ts` as a pure module:
   `Reminder`, `addReminder`, `clearReminder`, `renderReminders`,
   `MAX_REMINDER_TEXT_LENGTH` (FR-020, FR-021, FR-022, FR-025).
   Verify: module has no clock, randomness, or IO.
-- [ ] 2.2 [P] Extend `src/memo.ts`: `MemoInput.reminders`,
+- [x] 2.2 [P] Extend `src/memo.ts`: `MemoInput.reminders`,
   `MemoLimits.maxReminders`, and the `Reminders:` section via
   `renderReminders` (FR-022, FR-023). Verify: `test/memo.test.ts`
   still green.
-- [ ] 2.3 [P] Wire `index.ts`: `SessionState.reminders` +
+- [x] 2.3 [P] Wire `index.ts`: `SessionState.reminders` +
   `reminderSeq`, `ENV_MEMO_MAX_REMINDERS`, `resolveHookConfig`
   `maxReminders`, `PLUGIN_VERSION` 2.1.0 (FR-023). Verify: `bun test`
   green.
-- [ ] 2.4 [P] Register `remind_me` / `forget_reminder` on the hooks
+- [x] 2.4 [P] Register `remind_me` / `forget_reminder` on the hooks
   `tool` map with meta-prompt descriptions, side-session inertness,
   and actionable results (FR-020, FR-021, FR-024, FR-025). Verify:
   tool-layer tests green.
 
 ## 3. Tests
 
-- [ ] 3.1 [P] Write `test/reminders.test.ts`: module tests (add,
+- [x] 3.1 [P] Write `test/reminders.test.ts`: module tests (add,
   clear, render, bounds, truncation, whitespace), memo integration,
   and tool-layer tests with mocked `ToolContext` (FR-020..FR-025).
   Verify: new suite green under `bun test`.
-- [ ] 3.2 Update `package.json` `test:node` and the AGENTS.md test
+- [x] 3.2 Update `package.json` `test:node` and the AGENTS.md test
   command to include `test/reminders.test.ts`. Verify: `node --test`
   runs all three files green.
 
 ## 4. Verification and docs
 
-- [ ] 4.1 Run both runtimes green: `bun test` and
+- [x] 4.1 Run both runtimes green: `bun test` and
   `node --test test/audit.test.ts test/memo.test.ts
   test/reminders.test.ts` (CI parity per AGENTS.md).
-- [ ] 4.2 [P] Docs gate: `CHANGELOG.md` 2.1.0 entry; `README.md`
+- [x] 4.2 [P] Docs gate: `CHANGELOG.md` 2.1.0 entry; `README.md`
   agent-console section (remind_me / forget_reminder) and config
   table row for `OPENCODE_SUPERVISOR_MEMO_MAX_REMINDERS`;
   `AGENTS.md` structure rows for `src/reminders.ts` and the new test
