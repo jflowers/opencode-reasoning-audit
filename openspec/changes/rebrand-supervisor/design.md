@@ -63,12 +63,12 @@ title `reasoning-audit @ model (variant)` →
 `supervisor-audit @ model (variant)`. Short, stable, and accurate
 for the audit loop regardless of future consoles.
 
-### D5: Skill keeps its name, cross-refs updated
+### D5: Skill keeps its name, cross-refs verified
 
 `skills/reasoning-auditor/skill.md` stays (its technique is
-reasoning auditing; the middleware is what broadens). References
-from the skill to the middleware/repo are updated to the new
-identity.
+reasoning auditing; the middleware is what broadens). Verified:
+the skill is self-contained with no references to the middleware
+or repo, so no cross-reference update was needed.
 
 ## Risks / Trade-offs
 

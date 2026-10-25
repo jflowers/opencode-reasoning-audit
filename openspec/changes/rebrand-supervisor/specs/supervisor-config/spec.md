@@ -18,12 +18,14 @@ carry version 2.0.0. User-visible plugin output SHALL be prefixed
 
 #### Scenario: Plugin registers under the new id
 
+- **GIVEN** the plugin is installed and loadable by OpenCode
 - **WHEN** OpenCode loads the plugin
 - **THEN** it registers as `opencode-supervisor` at version 2.0.0
 
 #### Scenario: Critique messages carry the new prefix
 
-- **WHEN** a failed audit delivers a critique to the session
+- **GIVEN** a reasoning step fails its peer audit
+- **WHEN** the failed audit delivers a critique to the session
 - **THEN** the steering message is prefixed `[supervisor]`
 
 ### Requirement: FR-019 Supervisor configuration surface
@@ -38,10 +40,12 @@ plugin config, then environment, then defaults).
 
 #### Scenario: Renamed variable is honored
 
+- **GIVEN** the plugin resolves configuration for a session
 - **WHEN** `OPENCODE_SUPERVISOR_MAX_REGENERATIONS` is set to `4`
 - **THEN** the critique bound for that session is 4
 
 #### Scenario: Legacy variable is ignored
 
+- **GIVEN** the plugin resolves configuration for a session
 - **WHEN** only `OPENCODE_AUDITOR_MAX_REGENERATIONS` is set
 - **THEN** the default bound applies as if no variable were set
