@@ -1,19 +1,22 @@
 /**
  * Supervision Memo Builder
  * Formats the session's supervision context — the goal (FR-013), the
- * agent's reminders (FR-020), the solved-items log (FR-014), and the
- * prior-critiques log (FR-015) — into the bounded memo appended to the
- * system prompt before each model call (FR-016). Each section appears
+ * active engineer directives (FR-030), the agent's reminders
+ * (FR-020), the solved-items log (FR-014), and the prior-critiques
+ * log (FR-015) — into the bounded memo appended to the system
+ * prompt before each model call (FR-016). Each section appears
  * only when it has content; a session with nothing to show yields no memo
  * at all, so the system prompt is left untouched. Solved items, critiques,
  * and reminders are capped at configurable maximums, keeping the most
  * recent entries, so the memo cannot grow without limit across a long
- * session (FR-017, FR-023). Pure module: no OpenCode
+ * session (FR-017, FR-023); directives carry their own fixed render
+ * budget (FR-032). Pure module: no OpenCode
  * imports, no I/O, no session state — the hook layer (design D4) owns the
  * Maps and passes plain data in.
  */
 
 import type { AuditSeverity } from './auditor.ts';
+import { renderDirectives, type DirectiveText } from './directives.ts';
 import { renderReminders, type Reminder } from './reminders.ts';
 
 export interface SolvedItem {
@@ -33,6 +36,8 @@ export interface CritiqueRecord {
 export interface MemoInput {
   /** Session goal — the first user message (FR-013); absent until captured. */
   goal?: string;
+  /** Active engineer directives (FR-030); optional so directive-less callers are unchanged. */
+  directives?: DirectiveText[];
   /** Agent-set reminders (FR-020); optional so reminder-less callers are unchanged. */
   reminders?: Reminder[];
   solvedItems: SolvedItem[];
@@ -82,11 +87,18 @@ function takeMostRecent<T>(items: T[], cap: number): T[] {
  */
 export function buildMemo(input: MemoInput, limits: MemoLimits = DEFAULT_MEMO_LIMITS): string | null {
   const goal = input.goal?.trim();
+  const directives = input.directives ?? [];
   const reminders = takeMostRecent(input.reminders ?? [], limits.maxReminders);
   const solvedItems = takeMostRecent(input.solvedItems, limits.maxSolvedItems);
   const critiques = takeMostRecent(input.critiques, limits.maxCritiques);
 
-  if (!goal && reminders.length === 0 && solvedItems.length === 0 && critiques.length === 0) {
+  if (
+    !goal &&
+    directives.length === 0 &&
+    reminders.length === 0 &&
+    solvedItems.length === 0 &&
+    critiques.length === 0
+  ) {
     return null;
   }
 
@@ -94,6 +106,13 @@ export function buildMemo(input: MemoInput, limits: MemoLimits = DEFAULT_MEMO_LI
 
   if (goal) {
     sections.push(`Session goal:\n${goal}`);
+  }
+
+  if (directives.length > 0) {
+    const rendered = renderDirectives(directives);
+    if (rendered !== null) {
+      sections.push(rendered);
+    }
   }
 
   if (reminders.length > 0) {

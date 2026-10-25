@@ -1,26 +1,28 @@
 /**
  * opencode-supervisor — OpenCode Process Supervision hook layer
  *
- * Thin `@opencode-ai/plugin` module (design D1): `server(input)` returns
- * hooks that observe completed reasoning parts (`event`), capture the
- * session goal (`chat.message`), guard tool execution
- * (`tool.execute.before` / `tool.execute.after`), offer the agent
- * self-serve reminder tools (`tool`, FR-020/FR-021), and inject the
- * supervision memo (`experimental.chat.system.transform`). All audit
- * logic lives in the pure `src/` modules; this file owns the per-session
- * state (design D4), config resolution (session plugin config →
- * environment → `pluginConfig` defaults), and the D2 `invokeModel`
- * adapter that drives a dedicated auditor side session through
- * `input.client.session.prompt` — never the supervised conversation
- * (FR-004). Supervision fails open (FR-005): no hook path may crash or
- * stall the supervised session, except the tool guard's deliberate
- * block throw (spike 1.3).
+ * Thin `@opencode-ai/plugin` module (design D1): `server(input,
+ * options)` returns hooks that observe completed reasoning parts
+ * (`event`), capture the session goal (`chat.message`), guard tool
+ * execution (`tool.execute.before` / `tool.execute.after`), offer
+ * the agent self-serve reminder tools (`tool`, FR-020/FR-021),
+ * load and enforce engineer directives (FR-026..FR-032), and inject
+ * the supervision memo (`experimental.chat.system.transform`). All
+ * audit logic lives in the pure `src/` modules; this file owns the
+ * per-session state (design D4), config resolution (session plugin
+ * config → environment → `pluginConfig` defaults), the D2
+ * `invokeModel` adapter that drives a dedicated auditor side session
+ * through `input.client.session.prompt` — never the supervised
+ * conversation (FR-004) — and the fail-open directive loader
+ * (FR-032). Supervision fails open (FR-005): no hook path may
+ * crash or stall the supervised session, except the tool guard's
+ * deliberate block throw (spike 1.3).
  *
  * Runtime: Bun / TypeScript. Entry: default-exported PluginModule
  * (spike 1.4 — file-source plugins must carry `id`).
  */
 
-import { tool, type Hooks, type PluginInput, type PluginModule } from '@opencode-ai/plugin';
+import { tool, type Hooks, type PluginInput, type PluginModule, type PluginOptions } from '@opencode-ai/plugin';
 import {
   resolveAuditorConfig,
   runPeerAudit,
@@ -29,7 +31,7 @@ import {
   type InvokeModel,
 } from './src/auditor.ts';
 import { stripNarrative } from './src/stripper.ts';
-import { verifyToolIntent, type ToolVerificationResult } from './src/tool-guard.ts';
+import { extractArgPaths, verifyToolIntent, type ToolVerificationResult } from './src/tool-guard.ts';
 import { buildMemo, DEFAULT_MEMO_LIMITS, type CritiqueRecord, type MemoLimits, type SolvedItem } from './src/memo.ts';
 import {
   addReminder,
@@ -37,6 +39,18 @@ import {
   prepareReminderText,
   type Reminder,
 } from './src/reminders.ts';
+import {
+  activeDirectives,
+  compileEnforcement,
+  matchTriggers,
+  MAX_DIRECTIVES,
+  parseDirectives,
+  parseOptionsDirectives,
+  renderDirectivesAdvisory,
+  type Directive,
+} from './src/directives.ts';
+import fs from 'node:fs';
+import path from 'node:path';
 
 // ── Configuration (session plugin config → environment → defaults) ──
 
@@ -82,7 +96,7 @@ export const pluginConfig: HookConfig = {
  * build. `package.json` cannot be imported from here without a build
  * step, so the constant is the source of truth for the log prefix.
  */
-const PLUGIN_VERSION = '2.1.0';
+const PLUGIN_VERSION = '2.2.0';
 
 /** Emits the module-identity log line once per process (plugin load = first `server()` invocation, spike 1.4). */
 let identityLogged = false;
@@ -193,6 +207,8 @@ export interface SessionState {
   reminders: Reminder[];
   /** Monotonic reminder-id sequence (design D3): ids are `r<n>` and never recycled. */
   reminderSeq: number;
+  /** Directive ids whose `when` rules matched a tool call (FR-029), deduped for the session. */
+  triggeredDirectives: string[];
   /**
    * Reasoning-part identities already observed, keyed
    * `sessionID:messageID:partID` (spike 1.1), so duplicate audits are
@@ -213,6 +229,7 @@ function emptySessionState(): SessionState {
     critiqueLog: [],
     reminders: [],
     reminderSeq: 0,
+    triggeredDirectives: [],
     seenParts: new Set(),
   };
 }
@@ -771,6 +788,30 @@ function registerSystemTransform(hooks: Hooks, handler: SystemTransformHandler):
 // ── Plugin entry (design D1) ───────────────────────────────────────
 
 /**
+ * Loads directive files (FR-026) from
+ * `<directory>/.opencode/supervisor/directives/*.md`, sorted by
+ * filename for deterministic precedence. A missing or unreadable
+ * directory yields no files (fail-open, FR-032) — directive-less
+ * projects keep 2.1.0 behavior. I/O lives here in the hook layer
+ * (design D3); parsing is pure in src/directives.ts.
+ */
+const loadDirectiveFiles = (directory: string): { name: string; content: string }[] => {
+  try {
+    const directivesDir = path.join(directory, '.opencode', 'supervisor', 'directives');
+    return fs
+      .readdirSync(directivesDir, { withFileTypes: true })
+      .filter((entry) => entry.isFile() && entry.name.endsWith('.md'))
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .map((entry) => ({
+        name: entry.name,
+        content: fs.readFileSync(path.join(directivesDir, entry.name), 'utf8'),
+      }));
+  } catch {
+    return [];
+  }
+};
+
+/**
  * Plugin server (design D1): assembles the hook map. The `event` hook
  * runs the full supervision path (tasks 3.2–3.3): synchronous dedupe →
  * strip → deterministic invariants → side-session peer audit →
@@ -785,9 +826,39 @@ function registerSystemTransform(hooks: Hooks, handler: SystemTransformHandler):
  * except the tool guard's sanctioned block throw (spike 1.3).
  *
  * @param input The plugin input (OpenCode HTTP client, project context).
+ * @param options Tuple-registration options (`[path, options]` in the
+ *   `plugin` array): `options.directives` appends engineer directives
+ *   after the file sources (FR-026).
  * @returns The registered hooks.
  */
-const server = async (input: PluginInput): Promise<Hooks> => {
+const server = async (input: PluginInput, options?: PluginOptions): Promise<Hooks> => {
+  // Engineer console (FR-026..FR-032): directives are static policy
+  // loaded once per plugin start — not per-session state. Files come
+  // from `.opencode/supervisor/directives/*.md` in the project
+  // directory; tuple registration can add `options.directives`
+  // entries after them (D1). Loading is fail-open throughout
+  // (FR-032): unreadable directories yield no files, malformed files
+  // and invalid rules degrade to warnings, and the combined set is
+  // bounded to MAX_DIRECTIVES.
+  const directiveFiles = loadDirectiveFiles(input.directory);
+  const parsedFiles = parseDirectives(directiveFiles);
+  const parsedOptions = parseOptionsDirectives(options?.directives);
+  const allDirectives = [...parsedFiles.directives, ...parsedOptions.directives];
+  const directives: Directive[] = allDirectives.slice(0, MAX_DIRECTIVES);
+  const directiveWarnings = [
+    ...parsedFiles.warnings,
+    ...parsedOptions.warnings,
+    ...(allDirectives.length > MAX_DIRECTIVES
+      ? [`${allDirectives.length - MAX_DIRECTIVES} directive(s) beyond the cap of ${MAX_DIRECTIVES} dropped`]
+      : []),
+  ];
+  // D6: compiled enforcement feeds the tool guard (FR-028); the
+  // rendered advisory feeds the peer-audit prompt (FR-031).
+  const { enforcement, warnings: compileWarnings } = compileEnforcement(directives);
+  const directivesAdvisory = renderDirectivesAdvisory(directives);
+  for (const warning of [...directiveWarnings, ...compileWarnings]) {
+    console.warn(`[supervisor] ${warning}`);
+  }
   // Module identity (review finding #20): log the loaded version once
   // per process — plugin load is proven by `server()` invocation
   // (spike 1.4), so this is the load line.
@@ -800,7 +871,9 @@ const server = async (input: PluginInput): Promise<Hooks> => {
     // the model actually in use.
     const loaded = resolveHookConfig();
     console.log(
-      `[supervisor] v${PLUGIN_VERSION} loaded (auditor: ${loaded.auditorModel}, variant: ${loaded.auditorVariant})`
+      `[supervisor] v${PLUGIN_VERSION} loaded (auditor: ${loaded.auditorModel}, variant: ${loaded.auditorVariant}${
+        directives.length > 0 ? `, directives: ${directives.length}` : ''
+      })`
     );
   }
   // D2 adapter (task 3.2): the live audit path's invokeModel, bound
@@ -868,8 +941,9 @@ const server = async (input: PluginInput): Promise<Hooks> => {
         // Deterministic invariants (FR-003) short-circuit inside
         // runPeerAudit before the side-session call; the goal (FR-013,
         // captured by `chat.message`) scopes drift findings whenever
-        // present.
-        const outcome = await runPeerAudit([stepText], config, invokeModel, state.goal);
+        // present, and the engineer directives (FR-031) add violation
+        // criteria whenever configured.
+        const outcome = await runPeerAudit([stepText], config, invokeModel, state.goal, directivesAdvisory ?? undefined);
         if (outcome.passed) {
           // FR-006: only passed steps enter the verified trace, in
           // stripped form (FR-002) — the tool guard matches file paths
@@ -957,10 +1031,21 @@ const server = async (input: PluginInput): Promise<Hooks> => {
         // The session's live verified trace (FR-006): the same array
         // the event hook pushes stripped, passed steps onto, so the
         // guard sees every step as soon as its audit completes.
+        // FR-029: trigger rules are evaluated on every call — a
+        // blocked call still records its trigger, because the
+        // attempt itself is signal; recording happens before the
+        // guard decision so neither path loses it.
+        const state = sessionState.get(hookInput.sessionID);
+        for (const id of matchTriggers(directives, hookInput.tool, extractArgPaths(output.args))) {
+          if (!state.triggeredDirectives.includes(id)) {
+            state.triggeredDirectives.push(id);
+          }
+        }
         verification = verifyToolIntent(
           { name: hookInput.tool, arguments: output.args },
-          sessionState.get(hookInput.sessionID).verifiedSteps,
-          resolveHookConfig()
+          state.verifiedSteps,
+          resolveHookConfig(),
+          enforcement
         );
       } catch (error) {
         // Fail-open (FR-005): guard infrastructure must not break the session.
@@ -1122,6 +1207,9 @@ const server = async (input: PluginInput): Promise<Hooks> => {
       const memo = buildMemo(
         {
           goal: state.goal,
+          // FR-029/FR-030: unconditioned directives are always
+          // active; conditioned ones surface once triggered.
+          directives: activeDirectives(directives, state.triggeredDirectives),
           reminders: state.reminders,
           solvedItems: state.solvedItems,
           critiques: state.critiqueLog,

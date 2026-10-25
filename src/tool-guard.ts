@@ -1,14 +1,18 @@
 /**
  * Tool Execution Intent Verifier
- * Prevents reward hacking and blocks tool calls whose arguments contradict
- * or are absent from the verified reasoning trace. The trace check is
- * best-effort (design D5): when the verified trace is empty it MUST NOT
- * block (FR-011) — only the reward-hacking patterns still apply (FR-009).
- * Block reasons are actionable (FR-012): they name the failed check and,
+ * Prevents reward hacking, enforces engineer directives, and blocks
+ * tool calls whose arguments contradict or are absent from the
+ * verified reasoning trace. The trace check is best-effort (design
+ * D5): when the verified trace is empty it MUST NOT block (FR-011)
+ * — only the reward-hacking patterns still apply (FR-009).
+ * Directive enforcement (FR-028) applies whenever compiled engineer
+ * rules exist and never blocks when the rule set is empty. Block
+ * reasons are actionable (FR-012): they name the failed check and,
  * for trace mismatches, the unmatched path. Pure module: no OpenCode
  * imports, no I/O.
  */
 
+import { evaluateEnforcement, type CompiledEnforcement } from './directives.ts';
 import type { AuditConfig } from './auditor.ts';
 
 export interface ToolVerificationResult {
@@ -48,6 +52,18 @@ function matchRewardHackingMarker(rawArgs: string, lowerArgs: string): string | 
 const FILE_PATH_PATTERN = /[a-zA-Z0-9_.\-\/]+\.(?:ts|tsx|js|json|py|md|sql|sh)/g;
 
 /**
+ * Extracts every file-path token from the tool arguments (FR-010):
+ * top-level string values scanned for path characters ending in a
+ * known source/config extension. Shared by the trace check and by
+ * engineer-directive enforcement and triggers (FR-028, FR-029).
+ */
+export function extractArgPaths(args: Record<string, unknown> | undefined): string[] {
+  return Object.values(args || {})
+    .filter((v): v is string => typeof v === 'string')
+    .flatMap((v) => v.match(FILE_PATH_PATTERN) || []);
+}
+
+/**
  * Finds the first file path in the tool arguments that is absent from the
  * verified trace (FR-010). A path counts as referenced when the trace
  * contains either the full token or its basename, case-insensitively.
@@ -61,9 +77,7 @@ function findUnreferencedPath(
   verifiedSteps: string[]
 ): string | null {
   const combinedSteps = verifiedSteps.join(' ').toLowerCase();
-  const argPaths = Object.values(args || {})
-    .filter((v): v is string => typeof v === 'string')
-    .flatMap((v) => v.match(FILE_PATH_PATTERN) || []);
+  const argPaths = extractArgPaths(args);
 
   for (const fileToken of argPaths) {
     const base = fileToken.split('/').pop()?.toLowerCase() || fileToken.toLowerCase();
@@ -85,12 +99,14 @@ function findUnreferencedPath(
  * @param toolCall The tool name and arguments about to execute.
  * @param verifiedSteps Reasoning steps that passed audit (the session's verified trace).
  * @param config Flags gating the reward-hacking and trace checks.
+ * @param enforcement Compiled engineer-directive rules (FR-028); absent or empty never blocks.
  * @returns The verdict; `reason` is the model's corrective signal when blocked.
  */
 export function verifyToolIntent(
   toolCall: { name: string; arguments?: Record<string, unknown> },
   verifiedSteps: string[],
-  config: Pick<AuditConfig, 'blockRewardHacking' | 'requireStepReferenceInTools'>
+  config: Pick<AuditConfig, 'blockRewardHacking' | 'requireStepReferenceInTools'>,
+  enforcement?: CompiledEnforcement
 ): ToolVerificationResult {
   const rawArgs = JSON.stringify(toolCall.arguments || {});
   const lowerArgs = rawArgs.toLowerCase();
@@ -101,6 +117,25 @@ export function verifyToolIntent(
       return {
         allowed: false,
         reason: `Tool '${toolCall.name}' blocked by the reward-hacking check: arguments contain '${marker}'. Fix the underlying defect instead of weakening or bypassing tests.`,
+      };
+    }
+  }
+
+  // Engineer-directive enforcement (FR-028): applies whenever compiled
+  // rules exist — the directive set itself is the gate, not a config
+  // flag — and an empty rule set never blocks. Reasons name the
+  // directive, the match, and the advisory text (FR-012).
+  if (enforcement && (enforcement.forbidPaths.length > 0 || enforcement.forbidPatterns.length > 0)) {
+    const directiveVerdict = evaluateEnforcement(
+      enforcement,
+      toolCall.name,
+      rawArgs,
+      extractArgPaths(toolCall.arguments)
+    );
+    if (!directiveVerdict.allowed) {
+      return {
+        allowed: false,
+        reason: directiveVerdict.reason,
       };
     }
   }
