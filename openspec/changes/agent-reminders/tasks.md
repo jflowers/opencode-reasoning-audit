@@ -61,7 +61,7 @@
   infra-failed — opus endpoint down, 0 findings, excluded per
   RD-FR-025). Docs-level findings fixed in the advisory-sweep commit;
   code-level advisories tracked in #13; blog coverage tracked in #12.
-- [ ] 5.3 Open the PR from `opsx/agent-reminders` to `main`; archive
+- [x] 5.3 Open the PR from `opsx/agent-reminders` to `main`; archive
   the change via the opsx archive workflow after merge.
 
 ## Workflow follow-up
