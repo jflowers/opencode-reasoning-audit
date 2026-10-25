@@ -29,9 +29,10 @@ the audit module.
 - Changed: `package.json` name/description/keywords; GitHub repo
   renamed (old URLs redirect); `origin` remote updated.
 - Changed: docs rewritten around the supervision identity — README
-  (with a migration table), AGENTS.md, CHANGELOG 2.0.0 entry,
-  `skills/reasoning-auditor/skill.md` cross-references. The skill
-  keeps its name: standalone, it is a reasoning auditor.
+  (with a migration table), AGENTS.md, CHANGELOG 2.0.0 entry.
+  Verified: `skills/reasoning-auditor/skill.md` is self-contained
+  with no middleware or repo references; no update was required.
+  The skill keeps its name: standalone, it is a reasoning auditor.
 - Unchanged: all behavior, hooks, module structure, tests semantics;
   historical artifacts (`openspec/changes/audit-supervisor/`,
   `.uf/`) are not rewritten.
@@ -100,3 +101,11 @@ in the README.
 No behavior changes; the existing suite covers the renamed surface
 (config precedence, prefixes). Tests are updated in the same change
 and must pass under both runtimes.
+
+### V. Security by Default
+
+**Assessment**: PASS
+
+The rename touches no dependencies, input validation, or
+privileges, and removes no guard. No new attack surface is
+introduced.

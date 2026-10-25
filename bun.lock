@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "opencode-reasoning-audit",
+      "name": "opencode-supervisor",
       "dependencies": {
         "@opencode-ai/plugin": "^1.19.4",
       },

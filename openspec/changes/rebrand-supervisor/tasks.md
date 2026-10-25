@@ -32,10 +32,10 @@
 - [x] 2.4 [P] Add the `CHANGELOG.md` 2.0.0 entry: rename, breaking
   env-var cut with the full old→new list, repo rename note.
   Verify: entry lists all eight renamed variables.
-- [x] 2.5 [P] Update `skills/reasoning-auditor/skill.md`
+- [x] 2.5 [P] Verify `skills/reasoning-auditor/skill.md`
   cross-references to the middleware and repo (skill name
-  unchanged, design D5). Verify: skill references resolve to the
-  new identity.
+  unchanged, design D5). Verified: the skill is self-contained
+  with no middleware or repo references; no update required.
 
 ## 3. Verification
 
@@ -54,11 +54,13 @@
 
 ## 4. Repo rename and publication
 
-- [ ] 4.1 Rename the GitHub repo (`gh repo rename
+- [x] 4.1 Rename the GitHub repo (`gh repo rename
   opencode-supervisor`), update the local `origin` URL. Verify:
   `git push --dry-run` and `gh repo view` address the new name.
-- [ ] 4.2 File the documentation issue for this user-facing
-  change before merge (AGENTS.md documentation gate).
+- [x] 4.2 File the documentation issues for this user-facing
+  change before merge, naming both gate targets: this repo
+  (AGENTS.md documentation gate — #6) and `unbound-force/website`
+  (constitution cross-repo documentation rule — #326).
 - [ ] 4.3 Run `/uf.review-council` and resolve all REQUEST
   CHANGES before PR (AGENTS.md review mandate).
 - [ ] 4.4 Open the PR from `opsx/rebrand-supervisor` to `main`;
@@ -69,3 +71,5 @@
 - Changes B (`agent-reminders`), C (`engineer-directives`), and D
   (`supervisor-tools`) build on this rename and start only after
   this PR merges.
+- Content: blog issue #7 tracks the 2.0 rename announcement;
+  advisory #8 tracks the deferred legacy-env detect-and-warn.

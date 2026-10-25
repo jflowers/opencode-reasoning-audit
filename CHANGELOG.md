@@ -43,8 +43,8 @@ Spec deltas: `openspec/changes/rebrand-supervisor/specs/supervisor-config/spec.m
 - User-visible message prefix `[reasoning-audit]` → `[supervisor]`;
   the auditor side session is titled `supervisor-audit @ …`.
 - README rewritten around the supervision identity with a migration
-  table; no behavior changed — all 75 tests pass unmodified under
-  Bun and Node.
+  table; no behavior changed — test assertions updated only for
+  renamed identifiers (task 1.3); all 75 pass under Bun and Node.
 
 ## [1.0.0] - 2026-10-25
 
