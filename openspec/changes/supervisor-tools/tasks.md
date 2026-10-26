@@ -88,10 +88,13 @@
   follow-up commit (README §6 config table + intro/§1/§5.4 memo
   enumerations, AGENTS.md structure comment, CHANGELOG documentation
   bullet, tasks.md env-var wrap); code advisories tracked in #22.
-- [ ] 5.3 Open the PR opsx/supervisor-tools -> main and archive the
+- [x] 5.3 Open the PR opsx/supervisor-tools -> main and archive the
   change via the opsx archive workflow after merge. Record the PR
   number here. Verify: PR is open, assigned, and references this
   change.
+  PR #23 (https://github.com/jflowers/opencode-supervisor/pull/23):
+  open, assigned jflowers, references this change and the follow-up
+  issues; archive pending post-merge.
 
 ## Workflow follow-up
 
