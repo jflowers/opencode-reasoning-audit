@@ -1,6 +1,6 @@
 # opencode-supervisor
 
-An OpenCode middleware plugin that supervises AI agents while they work: it strips persuasive narrative from Chain-of-Thought steps, runs an independent peer audit in a side session, steers or interrupts the supervised session when a step fails, blocks reward-hacking and engineer-directive-violating tool calls before they execute, and keeps the agent oriented with a session memo (goal, directives, reminders, solved items, recent critiques).
+An OpenCode middleware plugin that supervises AI agents while they work: it strips persuasive narrative from Chain-of-Thought steps, runs an independent peer audit in a side session, steers or interrupts the supervised session when a step fails, blocks reward-hacking and engineer-directive-violating tool calls before they execute, and keeps the agent oriented with a session memo (goal, directives, reminders, solved items, agent reports, recent critiques).
 
 Formerly `opencode-reasoning-audit` (1.x). The repo and plugin were renamed as the project grows from a reasoning auditor into a supervision plane; see [Section 6.2](#62-migrating-from-1x) for the migration table.
 
@@ -24,7 +24,7 @@ This plugin implements **Process Supervision** and **Automated Self-Correction**
 Two more surfaces complete the supervision:
 
 - **Tool guard** (`tool.execute.before`): before any tool runs, the plugin blocks reward-hacking patterns, engineer-directive violations (forbidden paths and command patterns), and file paths that do not appear in the verified trace. A block throws, so the model receives the reason as a tool error it can act on. An empty trace or rule set never blocks.
-- **Supervisor memo** (`experimental.chat.system.transform`): before each model call, the plugin appends a bounded memo — session goal, active engineer directives, reminders, recently solved items, recent critiques — to the system prompt. This is a plugin-side append: whether the model actually receives the memo depends on the transport honoring pushed secondary system messages (see Section 9).
+- **Supervisor memo** (`experimental.chat.system.transform`): before each model call, the plugin appends a bounded memo — session goal, active engineer directives, reminders, recently solved items, agent reports, recent critiques — to the system prompt. This is a plugin-side append: whether the model actually receives the memo depends on the transport honoring pushed secondary system messages (see Section 9).
 
 The supervised agent also gets self-serve tools (`Hooks.tool`): `remind_me` / `forget_reminder` keep durable facts — dead ends, environment quirks, decisions, user constraints — in the supervision state, where they ride the memo and survive context compaction; `recall` reads the full retained state beyond the memo's render caps; `report` records blockers, deviations, outcomes, and notes for the engineer; and `request_audit` asks for an immediate peer audit of a stated claim (Section 7.4).
 
@@ -100,7 +100,7 @@ The peer audit runs in a dedicated side session created for each audit through t
 | `src/stripper.ts` | Narrative stripping (`code_and_math` / `balanced` / `strict`). |
 | `src/auditor.ts` | Peer audit: deterministic invariants, injected-model LLM audit, severity classification, goal-aware prompt, model/variant config resolution. |
 | `src/tool-guard.ts` | Tool intent verification: reward-hacking patterns, engineer-directive enforcement, and the verified-trace file-path check, with actionable block reasons. |
-| `src/memo.ts` | Pure memo builder: bounded goal / directives / reminders / solved-items / critiques sections; produces no memo when there is nothing to show. |
+| `src/memo.ts` | Pure memo builder: bounded goal / directives / reminders / solved-items / reports / critiques sections; produces no memo when there is nothing to show. |
 | `src/reminders.ts` | Agent-console reminders: pure storage (add, clear, prepare text) and memo rendering for the `remind_me` / `forget_reminder` tools. |
 | `src/console.ts` | Agent-console second slice: report records (storage, text hygiene, bounds), the `Agent reports` memo section, recall views over the full retained state, and the storage-retention constants. |
 | `src/directives.ts` | Engineer directives: pure parsing (markdown + rules fence), glob compilation, enforcement evaluation, trigger matching, and bounded rendering. |
@@ -134,9 +134,11 @@ Settings resolve in order of precedence at runtime:
 | `stripMode` | `OPENCODE_SUPERVISOR_STRIP_MODE` | `code_and_math` | Controls how `stripNarrative()` filters the Chain-of-Thought before the audit. See Section 6.1 below. |
 | `blockRewardHacking` | `OPENCODE_SUPERVISOR_BLOCK_REWARD_HACKING` | `true` | When `true`, the tool guard blocks tool calls that contain `--no-verify`, `.skip(`, `expect(true).toBe(true)`, or test deletion commands. |
 | `requireStepReferenceInTools` | `OPENCODE_SUPERVISOR_REQUIRE_STEP_REFERENCE_IN_TOOLS` | `true` | When `true`, the tool guard blocks tool calls whose file-path arguments do not appear in the verified reasoning trace. Never blocks when the trace is empty. |
-| `memoLimits.maxSolvedItems` | `OPENCODE_SUPERVISOR_MEMO_MAX_SOLVED_ITEMS` | `5` | Cap on solved items kept in state and shown in the memo. |
-| `memoLimits.maxCritiques` | `OPENCODE_SUPERVISOR_MEMO_MAX_CRITIQUES` | `3` | Cap on critiques kept in state and shown in the memo. |
+| `memoLimits.maxSolvedItems` | `OPENCODE_SUPERVISOR_MEMO_MAX_SOLVED_ITEMS` | `5` | Cap on solved items shown in the memo. Storage retains more (50) for `recall`; this knob bounds the rendered view. |
+| `memoLimits.maxCritiques` | `OPENCODE_SUPERVISOR_MEMO_MAX_CRITIQUES` | `3` | Cap on critiques shown in the memo. Storage retains more (30) for `recall`; this knob bounds the rendered view. |
 | `memoLimits.maxReminders` | `OPENCODE_SUPERVISOR_MEMO_MAX_REMINDERS` | `10` | Cap on reminders kept in state and shown in the memo (the most recent are kept). |
+| `memoLimits.maxReports` | `OPENCODE_SUPERVISOR_MEMO_MAX_REPORTS` | `5` | Cap on agent reports kept in state and shown in the memo (the most recent are kept). |
+| `maxOnDemandAudits` | `OPENCODE_SUPERVISOR_MAX_ON_DEMAND_AUDITS` | `8` | Per-session cap on audits requested through the `request_audit` tool. The automatic audit loop is unaffected. |
 
 Environment variable values: booleans accept exactly `true` or `false`; numbers must be non-negative; `stripMode` must be one of the three mode names. Invalid values fall through to the next precedence tier.
 
@@ -150,6 +152,8 @@ export OPENCODE_SUPERVISOR_REQUIRE_STEP_REFERENCE_IN_TOOLS=true
 export OPENCODE_SUPERVISOR_MEMO_MAX_SOLVED_ITEMS=5
 export OPENCODE_SUPERVISOR_MEMO_MAX_CRITIQUES=3
 export OPENCODE_SUPERVISOR_MEMO_MAX_REMINDERS=10
+export OPENCODE_SUPERVISOR_MEMO_MAX_REPORTS=5
+export OPENCODE_SUPERVISOR_MAX_ON_DEMAND_AUDITS=8
 ```
 
 ### 6.1 Understanding `stripMode`
