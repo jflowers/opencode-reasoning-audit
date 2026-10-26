@@ -49,6 +49,11 @@ Spec deltas:
   reaches further than the memo shows; memo output is unchanged.
 - `MemoLimits` gained a required `maxReports` field (default 5) —
   code constructing `MemoLimits` literals must add it.
+- Documentation: README §9's directive-glob limitation was rewritten to
+  match 2.2.0 behavior (root-anchored, case-insensitive globs; a
+  broader best-effort extractor than the verified-trace check;
+  `**/`-prefixed globs for deeper or differently anchored spellings) —
+  the prior text claimed the same extension set as the trace check.
 
 32 new tests (182 total) pass under Bun and Node 22+.
 

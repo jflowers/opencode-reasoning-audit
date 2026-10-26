@@ -22,8 +22,9 @@
 ## 2. Memo integration (src/memo.ts)
 
 - [x] 2.1 Add agentReports to MemoInput (optional) and maxReports to
-  MemoLimits (required, default 5) with the OPENCODE_SUPERVISOR_MEMO_MAX_
-  REPORTS env override in the precedence chain; render the bounded
+  MemoLimits (required, default 5) with the
+  OPENCODE_SUPERVISOR_MEMO_MAX_REPORTS env override in the precedence
+  chain; render the bounded
   "Agent reports" section between solved items and critiques. Verify:
   memo integration tests show reports riding the memo, the section
   absent when empty, and existing memo output unchanged when no reports
@@ -76,11 +77,17 @@
   verification issue, website capabilities update). Verify: a docs sweep
   finds no stale enumerations — every copy of the test command lists
   five files, and CHANGELOG counts match the test run summary.
-- [ ] 5.2 Run the full review council on the change diff; resolve all
+- [x] 5.2 Run the full review council on the change diff; resolve all
   REQUEST CHANGES findings with code fixes and regression tests, re-run
   both test runners to green, and record the final verdict here.
   Verify: council artifact shows APPROVE or APPROVE WITH ADVISORIES
   with zero HIGH or CRITICAL findings outstanding.
+  Verdict: APPROVE WITH ADVISORIES in a single round at d3fe00cd (0
+  HIGH, 0 CRITICAL; artifact .uf/artifacts/dispatch/bcea75a3-f4c9-4b79-
+  a59c-07b5e05d10be.json). Documentation advisories fixed in a doc-only
+  follow-up commit (README §6 config table + intro/§1/§5.4 memo
+  enumerations, AGENTS.md structure comment, CHANGELOG documentation
+  bullet, tasks.md env-var wrap); code advisories tracked in #22.
 - [ ] 5.3 Open the PR opsx/supervisor-tools -> main and archive the
   change via the opsx archive workflow after merge. Record the PR
   number here. Verify: PR is open, assigned, and references this
@@ -97,5 +104,9 @@
 - Documentation issues filed: verification #20 (in repo, post-merge
   checklist), blog #21, tutorial scope comment on #4, website
   capabilities update unbound-force/website#330.
+- Review-council code advisories tracked in #22 (focus length cap,
+  memo/console module cycle, test-harness extraction, cap-0 echo,
+  proposal metadata reconciliation at archive time, and LOW items).
+  Doc advisories were fixed in-branch post-verdict (doc-only commit).
 - Future change: engineer-directive rule kinds (approve-gates, required
   reviewers) remain on the roadmap (README §10).

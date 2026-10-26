@@ -38,7 +38,7 @@ opencode-supervisor/
 ├── src/
 │   ├── auditor.ts         # Peer audit: config resolution, deterministic invariants, injected-model LLM audit
 │   ├── stripper.ts        # Narrative stripping (code_and_math / balanced / strict)
-│   ├── memo.ts            # Supervisor memo builder (goal, directives, reminders, solved items, critiques; bounded)
+│   ├── memo.ts            # Supervisor memo builder (goal, directives, reminders, solved items, agent reports, critiques; bounded)
 │   ├── reminders.ts       # Agent-console reminders: pure storage and memo rendering
 │   ├── console.ts         # Agent-console second slice: report records, recall views, retention constants
 │   ├── directives.ts      # Engineer directives: parsing, rule compilation, matching, rendering
