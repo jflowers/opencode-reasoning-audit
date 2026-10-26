@@ -105,6 +105,10 @@
   issuecomment-6405743608.
 - Blog follow-up for 2.4.0: filed in 4.2 as #25. Docs
   verification backstop: #26.
+- Cross-repo capabilities page: filed in review round 1 as
+  unbound-force/website#331 (the 4.2 sweep missed it — the
+  docs-gate convention should enumerate the website repo by
+  name; noted for the convention fix).
 - Older unarchived changes (agent-reminders,
   rebrand-supervisor, audit-supervisor) can be swept the
   same way as supervisor-tools was.

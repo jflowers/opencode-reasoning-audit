@@ -45,6 +45,15 @@ Spec deltas:
 - Engineer-directives delta: the fence and `options.directives`
   tuple channel accept `approve` and `review` arrays alongside
   `enforce` and `when`.
+- Anti-self-approval default (review round 1): tool calls from
+  the supervised agent that touch the approvals file (any path
+  whose basename is `approvals.json`) are blocked — the agent
+  cannot self-approve a gate through its own tools.
+- Approvals reads are size-bounded (64 KiB; larger files fail
+  closed with the size error), every matching approve gate is
+  evaluated (overlapping policies block on the first
+  unapproved gate), and review-gate path matching survives
+  trailing-slash argument spellings.
 
 ### Changed
 
@@ -52,9 +61,10 @@ Spec deltas:
   the plugin's own agent-console tools are exempt from both gate
   kinds (gates guard the agent's effectors, not the supervision
   channel the block reasons point at — `request_audit` must stay
-  reachable).
+  reachable). The exemption set is derived from the registered
+  tool map, not a hand-maintained list.
 
-41 new tests (223 total) pass under Bun and Node 22+.
+47 new tests (229 total) pass under Bun and Node 22+.
 
 ## [2.3.0] - 2026-10-25
 

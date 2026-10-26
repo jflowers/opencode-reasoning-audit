@@ -405,10 +405,16 @@ is read fresh at each gated call: adding an entry approves the
 gate on the next matching call (each granted gate logs once per
 session), removing an entry revokes it, and an `expires` date in
 the past stops the entry from matching (the expiry day itself
-still counts). Verification fails **closed**: an unreadable or
+still counts; expiry is evaluated at UTC end of day). Gate
+path globs follow the other directive globs: root-anchored
+and case-insensitive, with `**/`-prefixed globs covering
+deeper or differently anchored spellings. Verification fails
+**closed**: an unreadable or
 malformed approvals file blocks the gated call carrying the
 error, while an absent file simply means "not approved" and
-blocks with the approval instruction. The plugin's own
+blocks with the approval instruction. Tool calls from the
+supervised agent that touch the approvals file are blocked by
+default — the agent cannot self-approve a gate. The plugin's own
 agent-console tools are exempt from both gate kinds — gates guard
 the agent's effectors, not the supervision channel the block
 reasons point the agent at (`request_audit`).
@@ -432,9 +438,9 @@ The memo uses the `experimental.chat.system.transform` hook. Experimental hooks 
 - Supervision state is in-process only. Restarting OpenCode clears the goal, the verified trace, and the logs.
 - The verified-trace file-path check is best-effort: a tool call that races an in-flight audit sees the partial trace (an empty trace never blocks).
 - A blocked tool surfaces to the model as an error tool result, so the model may retry the call (bounded by OpenCode's doom-loop check).
-- Directive `forbidPath` and `when`-path globs are root-anchored and case-insensitive, and match paths the guard extracts from tool arguments — a broader best-effort extractor than the verified-trace check (it sees dotfiles and extensionless paths), but `**/`-prefixed globs are required to cover deeper or differently anchored spellings. Directives load once at plugin start; there is no hot reload.
+- Directive `forbidPath`, `when`-path, `approve`-path, and `review`-path globs are root-anchored and case-insensitive, and match paths the guard extracts from tool arguments — a broader best-effort extractor than the verified-trace check (it sees dotfiles and extensionless paths), but `**/`-prefixed globs are required to cover deeper or differently anchored spellings. Directives load once at plugin start; there is no hot reload.
 - Agent reports are self-reported and unaudited: the supervisor surfaces them for the engineer but does not verify them, and report text never enters peer-audit prompts. On-demand audits are bounded per session and never interrupt. Recall is read-only.
-- The approvals file is plantable by the supervised agent (it lives in the project directory, the same trust class as directive files). Fail-closed verification limits the blast: a corrupted or self-authored approvals file can hold gated calls hostage, but cannot silently admit a gate the engineer never approved. Review gates block the first matching calls of a session until a passing audit references the path.
+- The approvals file is engineer-authored state. Tool calls from the supervised agent that touch it (any path whose basename is `approvals.json`) are blocked by default, so the agent cannot self-approve a gate through its own tools. The file remains writable by anything outside opencode — the same project-directory trust class as directive files — so grant logs identify the directive, gate key, and tool for later audit. Pair an `enforce` `forbidPath` rule over `.opencode/supervisor/**` for defense-in-depth. Review gates block the first matching calls of a session until a passing audit references the path.
 
 ---
 

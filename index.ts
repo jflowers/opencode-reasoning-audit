@@ -75,6 +75,7 @@ import {
   evaluateApproveGate,
   evaluateReviewGates,
   matchApproveGates,
+  MAX_APPROVALS_FILE_BYTES,
   parseApprovals,
   type ApprovalRecord,
 } from './src/gates.ts';
@@ -896,6 +897,15 @@ const readApprovals = (directory: string): { records: ApprovalRecord[]; error: s
   const approvalsPath = path.join(directory, '.opencode', 'supervisor', 'approvals.json');
   let raw: string;
   try {
+    // Bounded read (FR-045): a planted oversized file fails closed
+    // instead of stalling the event loop.
+    const stats = fs.statSync(approvalsPath);
+    if (stats.size > MAX_APPROVALS_FILE_BYTES) {
+      return {
+        records: [],
+        error: `approvals file is ${stats.size} bytes, exceeding the ${MAX_APPROVALS_FILE_BYTES}-byte read bound`
+      };
+    }
     raw = fs.readFileSync(approvalsPath, 'utf8');
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
@@ -905,14 +915,6 @@ const readApprovals = (directory: string): { records: ApprovalRecord[]; error: s
   }
   return parseApprovals(raw);
 };
-
-/**
- * The plugin's own agent-console tools. Gates guard the agent's
- * effectors — tools that change the world — not the supervision
- * channel itself: a review gate whose block reason points at
- * request_audit must not also block request_audit (design D2).
- */
-const CONSOLE_TOOL_NAMES = new Set(['remind_me', 'forget_reminder', 'recall', 'report', 'request_audit']);
 
 /**
  * Plugin server (design D1): assembles the hook map. The `event` hook
@@ -1161,43 +1163,79 @@ const server = async (input: PluginInput, options?: PluginOptions): Promise<Hook
         );
         // Directive gates (FR-043..FR-047; design D2): evaluated
         // only when the guard allows, so a forbidden path never
-        // reaches the gate question. Approve gates match purely
-        // first; the approvals file is read fresh ONLY on a match
-        // (un-gated calls pay no I/O), and verification fails
-        // closed on read or parse errors (FR-045) — unlike the
-        // load-time fail-open of FR-032. Review gates then
-        // require a trace reference for every gated path they
-        // touch (FR-047), including on an empty trace. The plugin's own
-        // console tools are exempt (see CONSOLE_TOOL_NAMES): the review
-        // gate's corrective instruction points at request_audit, so the
+        // reaches the gate question. The approvals file is
+        // engineer-authored state: the supervised agent may not
+        // touch it (FR-044), or it could self-approve. Approve
+        // gates match purely first (calls with no approve rules pay
+        // no serialization and no I/O); the approvals file is read
+        // fresh ONLY on a match, and verification fails closed on
+        // read or parse errors (FR-045) — unlike the load-time
+        // fail-open of FR-032. Every matching gate is verified, so
+        // overlapping policy cannot hide behind one approved broad
+        // gate. Review gates then require a trace reference for
+        // every gated path they touch (FR-047), including on an
+        // empty trace. The plugin's own console tools are exempt —
+        // derived from the registered tool map, so a future sixth
+        // tool is exempt automatically: the review gate's
+        // corrective instruction points at request_audit, so the
         // gate must leave the supervision channel itself open.
-        if (verification.allowed && !CONSOLE_TOOL_NAMES.has(hookInput.tool)) {
-          const rawArgs = JSON.stringify(output.args ?? {});
-          const approveMatch = matchApproveGates(
-            compiledGates.approve,
-            hookInput.tool,
-            rawArgs,
-            argPaths
+        if (
+          verification.allowed &&
+          !(hooks.tool !== undefined && Object.prototype.hasOwnProperty.call(hooks.tool, hookInput.tool))
+        ) {
+          // FR-044: the approvals file is engineer-authored state;
+          // agent tool calls touching it are blocked by default.
+          const touchesApprovals = argPaths.some(
+            (argPath) => (argPath.split('/').pop() || '').toLowerCase() === 'approvals.json'
           );
-          if (approveMatch !== null) {
-            const approval = readApprovals(input.directory);
-            const decision = evaluateApproveGate(
-              approveMatch,
+          if (touchesApprovals) {
+            verification = {
+              allowed: false,
+              reason: `Tool '${hookInput.tool}' blocked by the supervisor: the approvals file is engineer-authored state; the supervised agent may not touch it (engineer approval gates depend on it). Ask the engineer to update .opencode/supervisor/approvals.json.`
+            };
+          }
+          if (verification.allowed && compiledGates.approve.length > 0) {
+            const rawArgs = JSON.stringify(output.args ?? {});
+            const approveMatches = matchApproveGates(
+              compiledGates.approve,
               hookInput.tool,
-              approval.records,
-              approval.error
+              rawArgs,
+              argPaths
             );
-            if (decision.allowed) {
-              // FR-046: log the grant once per gate key (design
-              // D6, following the first-trigger precedent).
-              if (!state.grantedGates.has(approveMatch.key)) {
-                state.grantedGates.add(approveMatch.key);
-                console.log(
-                  `[supervisor] gate '${approveMatch.key}' approved for tool '${hookInput.tool}'`
-                );
+            if (approveMatches.length > 0) {
+              // FR-045: once a gate has matched, its check must not
+              // silently dissolve — unexpected failures here fail
+              // closed, unlike the fail-open catch below (FR-005).
+              try {
+                const approval = readApprovals(input.directory);
+                for (const approveMatch of approveMatches) {
+                  const decision = evaluateApproveGate(
+                    approveMatch,
+                    hookInput.tool,
+                    approval.records,
+                    approval.error
+                  );
+                  if (decision.allowed) {
+                    // FR-046: log the grant once per gate key
+                    // (design D6, following the first-trigger
+                    // precedent), naming directive + gate + tool.
+                    if (!state.grantedGates.has(approveMatch.key)) {
+                      state.grantedGates.add(approveMatch.key);
+                      console.log(
+                        `[supervisor] gate '${approveMatch.key}' of directive '${approveMatch.directiveId}' approved for tool '${hookInput.tool}'`
+                      );
+                    }
+                  } else {
+                    verification = decision;
+                    break;
+                  }
+                }
+              } catch (error) {
+                verification = {
+                  allowed: false,
+                  reason: `Tool '${hookInput.tool}' held by an engineer approval gate: the gate check failed closed (${errorText(error)}). Ask the engineer to inspect .opencode/supervisor/approvals.json, then retry.`
+                };
               }
-            } else {
-              verification = decision;
             }
           }
           if (verification.allowed && compiledGates.review.length > 0) {
