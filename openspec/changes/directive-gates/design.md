@@ -66,6 +66,16 @@ pure matcher; gated calls pay one file read. Approvals and
 revocations take effect on the next matching call because
 nothing is cached.
 
+Implementation amendment: the gate phase as a whole is skipped
+for the plugin's own agent-console tools (`remind_me`,
+`forget_reminder`, `recall`, `report`, `request_audit` — the
+`CONSOLE_TOOL_NAMES` set in `index.ts`). Gates guard the agent's
+effectors — tools that change the world — not the supervision
+channel itself: the review-gate block reason points the agent at
+`request_audit`, so leaving that channel gated would deadlock
+the advertised unblock path (a review gate on the touched path
+would otherwise block the very audit that satisfies it).
+
 ### D3: Gate keys are explicit or derived
 
 A gate key is the rule's explicit `id` when present, else

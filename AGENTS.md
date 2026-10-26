@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-OpenCode supervision middleware (formerly opencode-reasoning-audit) that audits, steers, and interrupts AI reasoning while the agent works. It hooks `event` (completed reasoning parts), `chat.message` (session goal), `tool.execute.before``/``tool.execute.after` (tool guard with engineer-directive enforcement, solved-items log), `experimental.chat.system.transform` (supervisor memo), and the `tool` map (agent console: `remind_me` / `forget_reminder` / `recall` / `report` / `request_audit`); strips persuasive narrative from Chain-of-Thought steps, runs an independent peer audit in a dedicated side session, delivers failed-audit critiques by steering the session via `promptAsync` (interrupting first on severe findings), blocks reward-hacking tool calls before execution, and loads engineer directives from `.opencode/supervisor/directives/` or plugin options (advisory memo surfacing plus tool-call enforcement). Roadmap: more engineer-directive rule kinds on the same session-state layer.
+OpenCode supervision middleware (formerly opencode-reasoning-audit) that audits, steers, and interrupts AI reasoning while the agent works. It hooks `event` (completed reasoning parts), `chat.message` (session goal), `tool.execute.before``/``tool.execute.after` (tool guard with engineer-directive enforcement, solved-items log), `experimental.chat.system.transform` (supervisor memo), and the `tool` map (agent console: `remind_me` / `forget_reminder` / `recall` / `report` / `request_audit`); strips persuasive narrative from Chain-of-Thought steps, runs an independent peer audit in a dedicated side session, delivers failed-audit critiques by steering the session via `promptAsync` (interrupting first on severe findings), blocks reward-hacking tool calls before execution, and loads engineer directives from `.opencode/supervisor/directives/` or plugin options (advisory memo surfacing, tool-call enforcement, and approve/review gate rules with fresh-read engineer approvals). Roadmap: deepen the engineer-directive rule vocabulary on the same session-state layer.
 
 - **Type**: OpenCode middleware plugin (TypeScript library)
 - **Runtime**: Bun (primary) / Node 22+ (fallback)
@@ -19,7 +19,7 @@ bun install
 bun test
 
 # Test (Node 22+)
-node --test test/audit.test.ts test/memo.test.ts test/reminders.test.ts test/directives.test.ts test/console.test.ts
+node --test test/audit.test.ts test/memo.test.ts test/reminders.test.ts test/directives.test.ts test/console.test.ts test/gates.test.ts
 
 # Register the plugin with OpenCode (local development)
 # Either add "./index.ts" to the "plugin" array in opencode.json, or:
@@ -42,13 +42,15 @@ opencode-supervisor/
 │   ├── reminders.ts       # Agent-console reminders: pure storage and memo rendering
 │   ├── console.ts         # Agent-console second slice: report records, recall views, retention constants
 │   ├── directives.ts      # Engineer directives: parsing, rule compilation, matching, rendering
+│   ├── gates.ts           # Engineer-console gate rules: approve/review compilation, approvals parsing, expiry matching
 │   └── tool-guard.ts      # Tool intent verification, engineer-directive enforcement, reward-hacking blocks
 ├── test/
 │   ├── audit.test.ts      # Auditor, tool-guard, and hook-layer tests (node:test, Bun and Node)
 │   ├── memo.test.ts       # Memo builder tests (node:test, Bun and Node)
 │   ├── reminders.test.ts  # Reminder module, memo integration, and tool-layer tests (node:test, Bun and Node)
 │   ├── directives.test.ts # Directive module, guard, trigger, and loader tests (node:test, Bun and Node)
-│   └── console.test.ts    # Console module, memo integration, and tool-layer tests (node:test, Bun and Node)
+│   ├── console.test.ts    # Console module, memo integration, and tool-layer tests (node:test, Bun and Node)
+│   └── gates.test.ts      # Gate module, approvals, and hook-layer gate tests (node:test, Bun and Node)
 ├── skills/
 │   └── reasoning-auditor/ # Standalone skill alternative (no middleware required)
 ├── openspec/              # OpenSpec change management (changes/, specs/, schemas/)
@@ -186,10 +188,10 @@ before writing or reviewing code.
 
 - **Plugin pattern**: `index.ts` default-exports a `PluginModule` (`{ id, server }`); `server(input, options)` returns the hook map (`event`, `chat.message`, `tool.execute.before`, `tool.execute.after`, `experimental.chat.system.transform`, plus the `tool` map for agent-console tools); `options.directives` registers engineer directives via tuple plugin registration; all logic lives in pure `src/` modules.
 - **Audit pipeline**: strip narrative (`stripNarrative`) → deterministic invariants → side-session peer audit (`runPeerAudit` with an injected `invokeModel`) → on failure, critique delivery: steer via `promptAsync` for `minor`, interrupt (`session.abort`) plus steer for `severe`, bounded by `maxRegenerations` per session; passed steps are recorded in a verified trace.
-- **Tool guard**: `verifyToolIntent` blocks reward-hacking patterns, engineer-directive violations (forbidden paths and command patterns), and file paths absent from the verified reasoning trace before any tool executes; an empty trace or rule set never blocks, and block reasons are actionable (the reason is the model's corrective signal).
+- **Tool guard**: `verifyToolIntent` blocks reward-hacking patterns, engineer-directive violations (forbidden paths and command patterns), and file paths absent from the verified reasoning trace before any tool executes; an empty trace or rule set never blocks, and block reasons are actionable (the reason is the model's corrective signal). After the guard verdict, `approve` gates hold matching calls for engineer approval (approvals file read fresh per gated call) and `review` gates hold calls until the verified trace references the path; agent-console tools are exempt so `request_audit` stays reachable.
 - **Supervisor memo**: `buildMemo` (`src/memo.ts`) formats the goal, active engineer directives, reminders, recently solved items, agent reports, and recent critiques into a bounded memo appended to the system prompt via the experimental transform hook; registration degrades gracefully when the hook is absent.
 - **Agent console**: the plugin registers five tools (`Hooks.tool`): `remind_me` / `forget_reminder` (`src/reminders.ts`) for durable reminders, and `recall` / `report` / `request_audit` (`src/console.ts`) for full-state recall beyond the memo caps, self-reported events, and on-demand peer audits of a stated focus (passed focus joins the verified trace; failed audits return the critique without steer/interrupt, bounded per session); tool results echo stored text (surviving gateway memo drops), side sessions get inert results, bodies fail open, and report text never enters audit prompts.
-- **Engineer console**: `server(input, options)` loads directives from `.opencode/supervisor/directives/*.md` (advisory markdown plus a fenced `supervisor` JSON rules block) and `options.directives` (tuple registration); unconditioned directives ride the memo always, `when` rules surface them after matching tool calls, `enforce` rules block tool calls through the guard, and the peer audit treats them as violation criteria.
+- **Engineer console**: `server(input, options)` loads directives from `.opencode/supervisor/directives/*.md` (advisory markdown plus a fenced `supervisor` JSON rules block) and `options.directives` (tuple registration); unconditioned directives ride the memo always, `when` rules surface them after matching tool calls, `enforce` rules block tool calls through the guard, `approve` rules hold calls for engineer approval (`src/gates.ts`, approvals read fresh per gated call, fail-closed verification), `review` rules hold calls until a passed peer audit references the path, and the peer audit treats directives as violation criteria.
 - **Config resolution**: `resolveHookConfig` / `resolveAuditorConfig` apply session → env → default precedence so users can override the auditor model without code changes.
-- **Session state**: module-level Maps keyed by session ID track the goal, verified steps, critique count, solved items, critique log, reminders, the reminder-id sequence, agent reports, the on-demand audit count, and triggered directive ids; in-process only, cleared on dispose. Solved-items and critique-log storage is bounded by retention constants (deeper than the memo render caps, so recall reaches further).
+- **Session state**: module-level Maps keyed by session ID track the goal, verified steps, critique count, solved items, critique log, reminders, the reminder-id sequence, agent reports, the on-demand audit count, triggered directive ids, and granted gate keys; in-process only, cleared on dispose. Solved-items and critique-log storage is bounded by retention constants (deeper than the memo render caps, so recall reaches further).
 - **Dual distribution**: the audit technique ships as middleware (`index.ts`) or a standalone skill (`skills/reasoning-auditor/skill.md`); the middleware adds steer/interrupt critique delivery, the tool guard, the supervisor memo, the agent-console tools, and the engineer console, which the skill cannot do.

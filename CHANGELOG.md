@@ -3,6 +3,59 @@
 All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [2.4.0] - 2026-10-26
+
+Spec deltas:
+`openspec/changes/directive-gates/specs/directive-gates/spec.md`,
+`openspec/changes/directive-gates/specs/engineer-directives/spec.md`.
+
+### Added
+
+- `directive-gates` capability spec (FR-043..FR-048): the engineer
+  console's defer-and-sign-off half — approval gates and review
+  gates as new rule kinds on the existing directive fence and
+  loader.
+- Approval gate blocking (FR-043): `approve` rules
+  (`id?`, `tool?`, `path?` glob, `pattern?` regex) hold matching
+  tool calls with a block reason naming the directive, the gate
+  key, and the exact approval instruction; matching follows
+  `enforce` (FR-028) semantics.
+- Approval records (FR-044): `.opencode/supervisor/approvals.json`
+  — a JSON array of `{gate, note?, expires?}` (most recent 50
+  kept) — is read fresh at each gated call, so approvals and
+  revocations take effect on the next matching call with no
+  restart; expired entries stop matching (expiry day inclusive).
+- Fail-closed verification (FR-045): an unreadable or malformed
+  approvals file blocks the gated call carrying the error, while
+  an absent file means "not approved" and blocks with the
+  instruction — in contrast to the load-time fail-open contract
+  (FR-032).
+- Grant logging (FR-046): each granted gate key logs once per
+  session, naming directive, gate, and tool (constitution III
+  observability: load, skip, block, trigger, approve).
+- Review gates (FR-047): `review` rules (`path` glob) hold
+  matching tool calls until the verified trace references the
+  touched path — the peer auditor is the required reviewer and
+  the `request_audit` tool can produce the sign-off immediately;
+  review gates deliberately block on an empty trace.
+- Gate rule parse hygiene (FR-048): approve/review rules share the
+  directive fence validation, per-kind bound (10), warnings, and
+  fail-open loading; advisory rendering never includes gate
+  internals.
+- Engineer-directives delta: the fence and `options.directives`
+  tuple channel accept `approve` and `review` arrays alongside
+  `enforce` and `when`.
+
+### Changed
+
+- `tool.execute.before` evaluates gates after the guard verdict;
+  the plugin's own agent-console tools are exempt from both gate
+  kinds (gates guard the agent's effectors, not the supervision
+  channel the block reasons point at — `request_audit` must stay
+  reachable).
+
+41 new tests (223 total) pass under Bun and Node 22+.
+
 ## [2.3.0] - 2026-10-25
 
 Spec deltas:

@@ -1,6 +1,6 @@
 # opencode-supervisor
 
-An OpenCode middleware plugin that supervises AI agents while they work: it strips persuasive narrative from Chain-of-Thought steps, runs an independent peer audit in a side session, steers or interrupts the supervised session when a step fails, blocks reward-hacking and engineer-directive-violating tool calls before they execute, and keeps the agent oriented with a session memo (goal, directives, reminders, solved items, agent reports, recent critiques).
+An OpenCode middleware plugin that supervises AI agents while they work: it strips persuasive narrative from Chain-of-Thought steps, runs an independent peer audit in a side session, steers or interrupts the supervised session when a step fails, blocks reward-hacking and engineer-directive-violating tool calls, and holds approve-gated and review-gated calls for engineer sign-off, before they execute, and keeps the agent oriented with a session memo (goal, directives, reminders, solved items, agent reports, recent critiques).
 
 Formerly `opencode-reasoning-audit` (1.x). The repo and plugin were renamed as the project grows from a reasoning auditor into a supervision plane; see [Section 6.2](#62-migrating-from-1x) for the migration table.
 
@@ -23,7 +23,7 @@ This plugin implements **Process Supervision** and **Automated Self-Correction**
 
 Two more surfaces complete the supervision:
 
-- **Tool guard** (`tool.execute.before`): before any tool runs, the plugin blocks reward-hacking patterns, engineer-directive violations (forbidden paths and command patterns), and file paths that do not appear in the verified trace. A block throws, so the model receives the reason as a tool error it can act on. An empty trace or rule set never blocks.
+- **Tool guard** (`tool.execute.before`): before any tool runs, the plugin blocks reward-hacking patterns, engineer-directive violations (forbidden paths and command patterns), and file paths that do not appear in the verified trace. It also holds `approve`-gated calls for engineer approval and `review`-gated calls for a passed peer audit. A block throws, so the model receives the reason as a tool error it can act on. An empty trace or rule set never blocks.
 - **Supervisor memo** (`experimental.chat.system.transform`): before each model call, the plugin appends a bounded memo — session goal, active engineer directives, reminders, recently solved items, agent reports, recent critiques — to the system prompt. This is a plugin-side append: whether the model actually receives the memo depends on the transport honoring pushed secondary system messages (see Section 9).
 
 The supervised agent also gets self-serve tools (`Hooks.tool`): `remind_me` / `forget_reminder` keep durable facts — dead ends, environment quirks, decisions, user constraints — in the supervision state, where they ride the memo and survive context compaction; `recall` reads the full retained state beyond the memo's render caps; `report` records blockers, deviations, outcomes, and notes for the engineer; and `request_audit` asks for an immediate peer audit of a stated claim (Section 7.4).
@@ -78,7 +78,7 @@ The plugin entry (`index.ts`) default-exports a `PluginModule` (`{ id, server }`
 | :--- | :--- |
 | `event` | Observes completed reasoning parts (`message.part.updated`), deduplicates them, strips narrative, runs the invariants and the side-session peer audit, records passed steps in the verified trace, and routes failures to critique delivery. |
 | `chat.message` | Captures the first user message of the session as the goal. The goal is never replaced. |
-| `tool.execute.before` | Tool guard: blocks reward-hacking tool calls, engineer-directive violations, and file paths absent from the verified trace (never blocks when the trace is empty); records directive triggers. |
+| `tool.execute.before` | Tool guard: blocks reward-hacking tool calls, engineer-directive violations, and file paths absent from the verified trace (never blocks when the trace is empty); holds approve-gated calls for engineer approval and review-gated calls for a passed peer audit (agent-console tools are exempt so `request_audit` stays reachable); records directive triggers. |
 | `tool.execute.after` | Appends a solved item (tool name + short outcome) to a bounded log. |
 | `tool` | Agent console: registers the tools the supervised agent can call — `remind_me` / `forget_reminder` (durable reminders), `recall` (full retained state), `report` (self-reported events), and `request_audit` (on-demand peer audit) (Section 7.4). |
 | `experimental.chat.system.transform` | Appends the supervisor memo to the system prompt. Degrades gracefully (memo-less operation) when the hook is absent. |
@@ -104,8 +104,9 @@ The peer audit runs in a dedicated side session created for each audit through t
 | `src/reminders.ts` | Agent-console reminders: pure storage (add, clear, prepare text) and memo rendering for the `remind_me` / `forget_reminder` tools. |
 | `src/console.ts` | Agent-console second slice: report records (storage, text hygiene, bounds), the `Agent reports` memo section, recall views over the full retained state, and the storage-retention constants. |
 | `src/directives.ts` | Engineer directives: pure parsing (markdown + rules fence), glob compilation, enforcement evaluation, trigger matching, and bounded rendering. |
+| `src/gates.ts` | Engineer-console gate rules: approve-gate and review-gate compilation and evaluation, approvals parsing, and expiry matching. |
 
-`src/` modules are pure and testable — they import no OpenCode APIs. Session state and OpenCode hooks live only in `index.ts`. State (goal, verified steps, critique count, solved items, critique log, reminders, agent reports, on-demand audit count, triggered directive ids) is held in module-level Maps keyed by session ID and dies with the opencode process; nothing is persisted.
+`src/` modules are pure and testable — they import no OpenCode APIs. Session state and OpenCode hooks live only in `index.ts`. State (goal, verified steps, critique count, solved items, critique log, reminders, agent reports, on-demand audit count, triggered directive ids, granted gate keys) is held in module-level Maps keyed by session ID and dies with the opencode process; nothing is persisted.
 
 ---
 
@@ -139,6 +140,8 @@ Settings resolve in order of precedence at runtime:
 | `memoLimits.maxReminders` | `OPENCODE_SUPERVISOR_MEMO_MAX_REMINDERS` | `10` | Cap on reminders kept in state and shown in the memo (the most recent are kept). |
 | `memoLimits.maxReports` | `OPENCODE_SUPERVISOR_MEMO_MAX_REPORTS` | `5` | Cap on agent reports kept in state and shown in the memo (the most recent are kept). |
 | `maxOnDemandAudits` | `OPENCODE_SUPERVISOR_MAX_ON_DEMAND_AUDITS` | `8` | Per-session cap on audits requested through the `request_audit` tool. The automatic audit loop is unaffected. |
+
+Gate approvals are not a knob: `approve` rules read `.opencode/supervisor/approvals.json` fresh at each gated call, so approving or revoking takes effect on the next tool call with no restart (Section 7.5).
 
 Environment variable values: booleans accept exactly `true` or `false`; numbers must be non-negative; `stripMode` must be one of the three mode names. Invalid values fall through to the next precedence tier.
 
@@ -198,7 +201,7 @@ bun install
 # 2. Run the unit tests (works with Bun or Node 22+)
 bun test
 # Or with Node:
-node --test test/audit.test.ts test/memo.test.ts test/reminders.test.ts test/directives.test.ts test/console.test.ts
+node --test test/audit.test.ts test/memo.test.ts test/reminders.test.ts test/directives.test.ts test/console.test.ts test/gates.test.ts
 
 # 3. Register the plugin with OpenCode (one of the options below)
 
@@ -341,6 +344,19 @@ directive is advisory text plus optional machine rules:
 - **`when` rules** surface a directive just-in-time: `tool` (tool
   name, case-insensitive) or `path` (argument-path glob). Blocked
   calls still record the trigger.
+- **`approve` rules** hold matching tool calls for engineer
+  approval: `id` (optional explicit gate key, else
+  `<directive>/<rule index>`), and any of `tool`, `path` (glob),
+  and `pattern` (regex, case-insensitive) — all present criteria
+  must match, following `enforce` semantics (FR-028). The block
+  reason names the directive, the gate key, and the exact
+  approval instruction.
+- **`review` rules** hold matching tool calls until the verified
+  trace references the touched path: `path` (glob). The peer
+  auditor is the required reviewer — a passed audit that
+  references the path is the sign-off, and the `request_audit`
+  tool can produce one immediately. Review gates deliberately
+  block on an empty trace.
 
 Directive files live in `.opencode/supervisor/directives/*.md` —
 the markdown body is the advisory text, and a fenced `supervisor`
@@ -382,6 +398,21 @@ loading fails open, and no directives configured means 2.1.0
 behavior. Directives load once at plugin start; there is no hot
 reload.
 
+Approvals live in `.opencode/supervisor/approvals.json` — a JSON
+array of `{ "gate": "<key>", "note": "...", "expires":
+"YYYY-MM-DD" }` records (at most 50, most recent kept). The file
+is read fresh at each gated call: adding an entry approves the
+gate on the next matching call (each granted gate logs once per
+session), removing an entry revokes it, and an `expires` date in
+the past stops the entry from matching (the expiry day itself
+still counts). Verification fails **closed**: an unreadable or
+malformed approvals file blocks the gated call carrying the
+error, while an absent file simply means "not approved" and
+blocks with the approval instruction. The plugin's own
+agent-console tools are exempt from both gate kinds — gates guard
+the agent's effectors, not the supervision channel the block
+reasons point the agent at (`request_audit`).
+
 ---
 
 ## 8. Tested Versions
@@ -403,6 +434,7 @@ The memo uses the `experimental.chat.system.transform` hook. Experimental hooks 
 - A blocked tool surfaces to the model as an error tool result, so the model may retry the call (bounded by OpenCode's doom-loop check).
 - Directive `forbidPath` and `when`-path globs are root-anchored and case-insensitive, and match paths the guard extracts from tool arguments — a broader best-effort extractor than the verified-trace check (it sees dotfiles and extensionless paths), but `**/`-prefixed globs are required to cover deeper or differently anchored spellings. Directives load once at plugin start; there is no hot reload.
 - Agent reports are self-reported and unaudited: the supervisor surfaces them for the engineer but does not verify them, and report text never enters peer-audit prompts. On-demand audits are bounded per session and never interrupt. Recall is read-only.
+- The approvals file is plantable by the supervised agent (it lives in the project directory, the same trust class as directive files). Fail-closed verification limits the blast: a corrupted or self-authored approvals file can hold gated calls hostage, but cannot silently admit a gate the engineer never approved. Review gates block the first matching calls of a session until a passing audit references the path.
 
 ---
 
@@ -411,7 +443,7 @@ The memo uses the `experimental.chat.system.transform` hook. Experimental hooks 
 The audit loop above is the automated pillar; both consoles now ship — the agent console (first slice 2.1.0, second slice 2.3.0) and the engineer console (2.2.0). Both write the same session-state layer rendered through the memo:
 
 1. **Agent console (self-serve tools)**: shipped — `remind_me` / `forget_reminder` for durable, compaction-proof reminders ("this project needs bash 4.5 for the test suite"), plus `recall` (full retained state beyond the memo caps), `report` (blockers, deviations, outcomes, notes), and `request_audit` (on-demand peer audit of a stated claim) (Section 7.4).
-2. **Engineer console (directives)**: shipped — directive files and tuple-registered options (`.opencode/supervisor/directives/*.md`, `options.directives`) with advisory memo surfacing, `when` triggers, `enforce` rules wired into the tool guard, and audit criteria (Section 7.5). Remaining: more rule kinds (for example approve-gates, required reviewers) on the same loader.
+2. **Engineer console (directives)**: shipped — directive files and tuple-registered options (`.opencode/supervisor/directives/*.md`, `options.directives`) with advisory memo surfacing, `when` triggers, `enforce` rules wired into the tool guard, audit criteria, and `approve` / `review` gate rules — approval gates with a fresh-read approvals file and review gates satisfied by a passed peer audit (Section 7.5).
 
 ---
 
