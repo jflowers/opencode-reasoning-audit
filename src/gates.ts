@@ -18,6 +18,13 @@ import { globToRegExp, type Directive } from './directives.ts';
  */
 export const MAX_APPROVALS = 50;
 
+/**
+ * Fixed upper bound on the approvals file size read per gated
+ * call (FR-045): a larger file fails closed with an error
+ * instead of stalling the event loop on a planted file.
+ */
+export const MAX_APPROVALS_FILE_BYTES = 64 * 1024;
+
 /** One engineer-recorded approval (FR-044). */
 export interface ApprovalRecord {
   /** Gate key this record approves. */
@@ -36,12 +43,8 @@ export interface CompiledApproveGate {
   directiveId: string;
   /** Tool name that must match (case-insensitive). */
   tool?: string;
-  /** Original path glob, for messages. */
-  pathGlob?: string;
   /** Compiled path glob. */
   pathRegex?: RegExp;
-  /** Original pattern source, for messages. */
-  patternSource?: string;
   /** Compiled regex applied to the raw serialized arguments. */
   patternRegex?: RegExp;
 }
@@ -103,7 +106,6 @@ export function compileGates(directives: Directive[]): {
       const gate: CompiledApproveGate = { key, directiveId: directive.id };
       if (typeof rule.tool === 'string') gate.tool = rule.tool;
       if (typeof rule.path === 'string') {
-        gate.pathGlob = rule.path;
         gate.pathRegex = globToRegExp(rule.path);
       }
       let hasCriterion =
@@ -111,7 +113,6 @@ export function compileGates(directives: Directive[]): {
       if (typeof rule.pattern === 'string') {
         try {
           gate.patternRegex = new RegExp(rule.pattern, 'i');
-          gate.patternSource = rule.pattern;
           hasCriterion = true;
         } catch (error) {
           warnings.push(
@@ -144,15 +145,16 @@ export function compileGates(directives: Directive[]): {
  * semantics): tool name compares case-insensitively, the path
  * glob tests full path or basename of some extracted policy
  * path, and the pattern tests the raw serialized arguments.
- * Returns the first matching gate, or null when no gate
- * matches.
+ * Returns every matching gate so overlapping policy is
+ * evaluated in full; an empty array means no gate matched.
  */
 export function matchApproveGates(
   gates: CompiledApproveGate[],
   toolName: string,
   rawArgs: string,
   argPaths: string[]
-): ApproveGateMatch | null {
+): ApproveGateMatch[] {
+  const matches: ApproveGateMatch[] = [];
   for (const gate of gates) {
     if (
       gate.tool !== undefined &&
@@ -163,7 +165,7 @@ export function matchApproveGates(
     if (gate.pathRegex !== undefined) {
       const pathMatched = argPaths.some((argPath) => {
         const base =
-          argPath.split('/').pop()?.toLowerCase() ?? argPath.toLowerCase();
+          argPath.split('/').pop()?.toLowerCase() || argPath.toLowerCase();
         return (
           gate.pathRegex!.test(argPath) || gate.pathRegex!.test(base)
         );
@@ -173,9 +175,9 @@ export function matchApproveGates(
     if (gate.patternRegex !== undefined && !gate.patternRegex.test(rawArgs)) {
       continue;
     }
-    return { key: gate.key, directiveId: gate.directiveId };
+    matches.push({ key: gate.key, directiveId: gate.directiveId });
   }
-  return null;
+  return matches;
 }
 
 /**
@@ -289,13 +291,16 @@ export function evaluateReviewGates(
   argPaths: string[],
   verifiedSteps: string[]
 ): GateDecision {
-  const combinedSteps = verifiedSteps.join(' ').toLowerCase();
+  let combinedSteps: string | null = null;
   for (const gate of gates) {
     for (const argPath of argPaths) {
       const base =
-        argPath.split('/').pop()?.toLowerCase() ?? argPath.toLowerCase();
+        argPath.split('/').pop()?.toLowerCase() || argPath.toLowerCase();
       const touched = gate.regex.test(argPath) || gate.regex.test(base);
       if (!touched) continue;
+      if (combinedSteps === null) {
+        combinedSteps = verifiedSteps.join(' ').toLowerCase();
+      }
       const referenced =
         combinedSteps.includes(base) ||
         combinedSteps.includes(argPath.toLowerCase());

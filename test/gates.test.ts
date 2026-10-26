@@ -203,36 +203,49 @@ test('compileGates compiles review rules with their path globs', () => {
 test('matchApproveGates matches tool names case-insensitively', () => {
   const { gates } = compileGates([approveDirective([{ tool: 'bash' }])]);
   const match = matchApproveGates(gates.approve, 'BASH', '{}', []);
-  assert.deepEqual(match, { key: 'prod-guard/0', directiveId: 'prod-guard' });
+  assert.deepEqual(match, [{ key: 'prod-guard/0', directiveId: 'prod-guard' }]);
 });
 
 test('matchApproveGates matches a full extracted path against the glob', () => {
   const { gates } = compileGates([approveDirective([{ path: 'secrets/**' }])]);
   const match = matchApproveGates(gates.approve, 'bash', '{}', ['secrets/key.pem']);
-  assert.equal(match?.key, 'prod-guard/0');
+  assert.equal(match.length, 1);
+  assert.equal(match[0].key, 'prod-guard/0');
 });
 
 test('matchApproveGates matches a basename when the glob is shallow', () => {
   const { gates } = compileGates([approveDirective([{ path: '*.pem' }])]);
   const match = matchApproveGates(gates.approve, 'bash', '{}', ['secrets/key.pem']);
-  assert.equal(match?.key, 'prod-guard/0');
+  assert.equal(match.length, 1);
+  assert.equal(match[0].key, 'prod-guard/0');
 });
 
 test('matchApproveGates applies the pattern to the raw serialized arguments', () => {
   const { gates } = compileGates([approveDirective([{ pattern: 'git push --force' }])]);
   const match = matchApproveGates(gates.approve, 'bash', '{"command":"git push --force origin main"}', []);
-  assert.equal(match?.key, 'prod-guard/0');
+  assert.equal(match.length, 1);
+  assert.equal(match[0].key, 'prod-guard/0');
 });
 
 test('matchApproveGates requires every present criterion to hold', () => {
   const { gates } = compileGates([approveDirective([{ tool: 'bash', path: 'secrets/**' }])]);
   const match = matchApproveGates(gates.approve, 'bash', '{}', ['docs/readme.md']);
-  assert.equal(match, null);
+  assert.deepEqual(match, []);
 });
 
-test('matchApproveGates returns null when no gate matches', () => {
+test('matchApproveGates returns an empty array when no gate matches', () => {
   const { gates } = compileGates([approveDirective([{ tool: 'bash' }])]);
-  assert.equal(matchApproveGates(gates.approve, 'edit', '{}', ['src/billing/invoice.ts']), null);
+  assert.deepEqual(matchApproveGates(gates.approve, 'edit', '{}', ['src/billing/invoice.ts']), []);
+});
+
+test('matchApproveGates collects every matching gate when policies overlap', () => {
+  const { gates } = compileGates([
+    approveDirective([{ id: 'broad', tool: 'bash' }]),
+    approveDirective([{ id: 'narrow', tool: 'bash', path: 'ops/**' }]),
+  ]);
+  const match = matchApproveGates(gates.approve, 'bash', '{}', ['ops/deploy.sh']);
+  assert.equal(match.length, 2);
+  assert.deepEqual(match.map((m) => m.key), ['broad', 'narrow']);
 });
 
 // ── Pure module: parseApprovals and approvalMatches (FR-044) ──
@@ -369,6 +382,17 @@ test('evaluateReviewGates blocks on an empty trace', () => {
   assert.equal(decision.allowed, false);
 });
 
+test('evaluateReviewGates blocks a trailing-slash path on an empty trace', () => {
+  const { gates } = compileGates([{
+    id: 'rg',
+    text: 'Billing changes need review.',
+    review: [{ path: 'src/billing/**' }],
+  }]);
+  const decision = evaluateReviewGates(gates.review, 'bash', ['src/billing/'], []);
+  assert.equal(decision.allowed, false);
+  assert.ok(decision.reason.includes("'src/billing/'"), decision.reason);
+});
+
 test('evaluateReviewGates matches trace references case-insensitively', () => {
   const { gates } = compileGates([{
     id: 'rg',
@@ -424,7 +448,7 @@ test('a recorded approval admits the gate and logs the grant once', async () => 
       const hooks = await plugin.server(mockPluginInput(dir));
       await dispatchToolBefore(hooks, 'gate-approve-1', 'bash', { command: 'deploy.sh' });
       await dispatchToolBefore(hooks, 'gate-approve-1', 'bash', { command: 'deploy.sh' });
-      const grants = logs.filter((line) => line.includes("gate 'deploy' approved for tool 'bash'"));
+      const grants = logs.filter((line) => line.includes("gate 'deploy' of directive 'gates' approved for tool 'bash'"));
       assert.equal(grants.length, 1);
       await hooks.dispose!();
     } finally {
@@ -566,6 +590,101 @@ test('a call that matches no gate proceeds untouched', async () => {
     try {
       const hooks = await plugin.server(mockPluginInput(dir));
       await dispatchToolBefore(hooks, 'gate-pass-1', 'edit', { path: 'src/other/file.ts' });
+      await hooks.dispose!();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+test('an overlapping approve gate set blocks on the first unapproved gate', async () => {
+  await withCleanGatesEnv(async () => {
+    const dir = makeDirectiveDir({
+      'broad.md': directiveFile('Broad gate.', { approve: [{ id: 'broad', tool: 'bash' }] }),
+      'narrow.md': directiveFile('Narrow gate.', { approve: [{ id: 'narrow', tool: 'bash', path: 'ops/**' }] }),
+    });
+    writeApprovals(dir, '[{"gate":"broad"}]');
+    try {
+      const hooks = await plugin.server(mockPluginInput(dir));
+      await assert.rejects(
+        dispatchToolBefore(hooks, 'gate-multi-1', 'bash', { command: 'sh ops/deploy.sh' }),
+        (error: unknown) => {
+          const message = error instanceof Error ? error.message : String(error);
+          assert.ok(message.includes("approval gate 'narrow'"), message);
+          assert.ok(message.includes('engineer approval required'), message);
+          return true;
+        }
+      );
+      await hooks.dispose!();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+test('a review gate blocks a trailing-slash path on an empty trace', async () => {
+  await withCleanGatesEnv(async () => {
+    const dir = makeDirectiveDir({
+      'review-gates.md': directiveFile('Billing changes need review.', { review: [{ path: 'src/billing/**' }] }),
+    });
+    try {
+      const hooks = await plugin.server(mockPluginInput(dir));
+      await assert.rejects(
+        dispatchToolBefore(hooks, 'gate-slash-1', 'bash', { command: 'rm -rf src/billing/' }),
+        (error: unknown) => {
+          const message = error instanceof Error ? error.message : String(error);
+          assert.ok(message.includes('review gate'), message);
+          assert.ok(message.includes('src/billing/'), message);
+          return true;
+        }
+      );
+      await hooks.dispose!();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+test('the agent cannot touch the approvals file', async () => {
+  await withCleanGatesEnv(async () => {
+    const dir = makeDirectiveDir({});
+    try {
+      const hooks = await plugin.server(mockPluginInput(dir));
+      await assert.rejects(
+        dispatchToolBefore(hooks, 'gate-self-1', 'bash', {
+          command: 'cat .opencode/supervisor/approvals.json',
+        }),
+        (error: unknown) => {
+          const message = error instanceof Error ? error.message : String(error);
+          assert.ok(message.includes('engineer-authored state'), message);
+          assert.ok(message.includes('approvals.json'), message);
+          return true;
+        }
+      );
+      await hooks.dispose!();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+test('an oversized approvals file fails closed', async () => {
+  await withCleanGatesEnv(async () => {
+    const dir = makeDirectiveDir({
+      'gates.md': directiveFile('Deploys are gated.', { approve: [{ id: 'prod-deploy', tool: 'bash' }] }),
+    });
+    writeApprovals(dir, '[' + '"x",'.repeat(40000) + '"x"]');
+    try {
+      const hooks = await plugin.server(mockPluginInput(dir));
+      await assert.rejects(
+        dispatchToolBefore(hooks, 'gate-oversize-1', 'bash', { command: 'deploy.sh' }),
+        (error: unknown) => {
+          const message = error instanceof Error ? error.message : String(error);
+          assert.ok(message.includes('exceeding'), message);
+          assert.ok(message.includes('read bound'), message);
+          return true;
+        }
+      );
       await hooks.dispose!();
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });

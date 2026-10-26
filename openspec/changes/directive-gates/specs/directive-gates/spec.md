@@ -43,6 +43,13 @@ enforcement-rule semantics (FR-028).
 - **WHEN** a tool call matches no approve rule
 - **THEN** approval evaluation returns no block
 
+#### Scenario: agent-console tools stay reachable
+- **WHEN** a call to a tool the plugin itself registers in its
+      agent console (`remind_me`, `forget_reminder`, `recall`,
+      `report`, `request_audit`) matches an approve rule
+- **THEN** the call proceeds without gate evaluation, keeping
+      the supervision channel reachable
+
 ### Requirement: Approval records
 
 The plugin SHALL read approval records from
@@ -70,6 +77,14 @@ entries by a fixed cap.
 - **WHEN** an engineer removes gate `deploy` from the
       approvals file
 - **THEN** the next call matching gate `deploy` is blocked
+
+#### Scenario: the agent cannot self-approve
+- **WHEN** a supervised tool call's arguments reference the
+      approvals file (any path whose basename is
+      `approvals.json`)
+- **THEN** the call is blocked with a reason naming the
+      approvals file as engineer-authored state, so the
+      supervised agent cannot self-approve a gate
 
 ### Requirement: Approval verification fails closed
 
@@ -133,6 +148,13 @@ path and pass a peer audit first (including via the
       touches a review-gated path
 - **THEN** the call is blocked with the audit-first
       instruction
+
+#### Scenario: agent-console tools stay reachable
+- **WHEN** a call to a tool the plugin itself registers in its
+      agent console (`remind_me`, `forget_reminder`, `recall`,
+      `report`, `request_audit`) matches a review rule
+- **THEN** the call proceeds without gate evaluation, keeping
+      the supervision channel reachable
 
 ### Requirement: Gate rule bounds and parse hygiene
 

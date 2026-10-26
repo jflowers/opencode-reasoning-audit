@@ -68,8 +68,11 @@ nothing is cached.
 
 Implementation amendment: the gate phase as a whole is skipped
 for the plugin's own agent-console tools (`remind_me`,
-`forget_reminder`, `recall`, `report`, `request_audit` — the
-`CONSOLE_TOOL_NAMES` set in `index.ts`). Gates guard the agent's
+`forget_reminder`, `recall`, `report`, `request_audit`). The
+exemption set is DERIVED from the registered tool map (the
+keys of `hooks.tool` in `index.ts`) rather than a
+hand-maintained list, so a future sixth console tool is exempt
+automatically. Gates guard the agent's
 effectors — tools that change the world — not the supervision
 channel itself: the review-gate block reason points the agent at
 `request_audit`, so leaving that channel gated would deadlock
@@ -120,11 +123,12 @@ the path and the audit-first instruction.
 ### D6: Grant logging follows the trigger precedent
 
 The first grant per gate key per session logs
-`[supervisor] gate '<key>' approved for tool '<tool>'`
-(constitution III: load, skip, block, trigger, approve);
-later grants through the same key are silent, mirroring
-`triggeredDirectives`. A `grantedGates: Set<string>` on
-`SessionState` tracks first grants and clears on dispose.
+`[supervisor] gate '<key>' of directive '<directiveId>'
+approved for tool '<tool>'` (constitution III: load, skip,
+block, trigger, approve — FR-046 requires the directive to be
+identified); later grants through the same key are silent,
+mirroring `triggeredDirectives`. A `grantedGates: Set<string>`
+on `SessionState` tracks first grants and clears on dispose.
 
 ### D7: Rule validation mirrors the existing kinds
 
