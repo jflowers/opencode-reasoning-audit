@@ -212,6 +212,86 @@ test('parseDirectives parses when-rules alongside enforce-rules', () => {
   assert.deepEqual(directives[0].when, [{ tool: 'bash' }, { path: 'src/crypto/**' }]);
 });
 
+// ── Pure module: approve and review rule kinds (FR-043, FR-047, FR-048) ──
+
+test('parseDirectives reads approve and review rules from the fence', () => {
+  const rules = {
+    approve: [{ id: 'deploy', tool: 'bash' }],
+    review: [{ path: 'src/billing/**' }],
+  };
+  const { directives, warnings } = parseDirectives([
+    { name: 'gated.md', content: directiveFile('Gate production changes.', rules) },
+  ]);
+  assert.deepEqual(warnings, []);
+  assert.equal(directives.length, 1);
+  assert.equal(directives[0].id, 'gated');
+  assert.equal(directives[0].text, 'Gate production changes.');
+  assert.deepEqual(directives[0].approve, [{ id: 'deploy', tool: 'bash' }]);
+  assert.deepEqual(directives[0].review, [{ path: 'src/billing/**' }]);
+});
+
+test('parseOptionsDirectives accepts approve and review rules from the tuple channel', () => {
+  const { directives, warnings } = parseOptionsDirectives([
+    { id: 'opt-gates', text: 'Gate deploys.', approve: [{ tool: 'bash' }], review: [{ path: 'ops/**' }] },
+  ]);
+  assert.deepEqual(warnings, []);
+  assert.deepEqual(directives[0].approve, [{ tool: 'bash' }]);
+  assert.deepEqual(directives[0].review, [{ path: 'ops/**' }]);
+});
+
+test('parseDirectives drops invalid approve rules with a warning while keeping valid ones', () => {
+  const rules = { approve: [{ tool: 42 }, { tool: 'bash' }] };
+  const { directives, warnings } = parseDirectives([
+    { name: 'mixed-gates.md', content: directiveFile('Policy.', rules) },
+  ]);
+  assert.deepEqual(directives[0].approve, [{ tool: 'bash' }]);
+  assert.equal(warnings.length, 1);
+  assert.ok(warnings[0].includes("'mixed-gates'"));
+  assert.ok(warnings[0].includes('1 approve rule(s) skipped'));
+});
+
+test('parseDirectives drops review rules without a path with a warning', () => {
+  const rules = { review: [{}, { path: 'ops/**' }] };
+  const { directives, warnings } = parseDirectives([
+    { name: 'review-gates.md', content: directiveFile('Policy.', rules) },
+  ]);
+  assert.deepEqual(directives[0].review, [{ path: 'ops/**' }]);
+  assert.equal(warnings.length, 1);
+  assert.ok(warnings[0].includes('1 review rule(s) skipped'));
+});
+
+test('parseDirectives bounds approve and review rules per kind at the shared cap', () => {
+  const rules = {
+    approve: Array.from({ length: 12 }, (_, i) => ({ tool: `t${i}` })),
+    review: Array.from({ length: 12 }, (_, i) => ({ path: `p${i}/**` })),
+  };
+  const { directives, warnings } = parseDirectives([
+    { name: 'capped-gates.md', content: directiveFile('Policy.', rules) },
+  ]);
+  assert.equal(directives[0].approve?.length, 10);
+  assert.equal(directives[0].review?.length, 10);
+  assert.equal(warnings.length, 2);
+  assert.ok(warnings.some((w) => w.includes('2 approve rule(s) skipped')));
+  assert.ok(warnings.some((w) => w.includes('2 review rule(s) skipped')));
+});
+
+test('advisory rendering carries directive text only, never gate rule internals', () => {
+  const { directives } = parseDirectives([
+    {
+      name: 'gated.md',
+      content: directiveFile('Gate production changes.', {
+        approve: [{ id: 'deploy', tool: 'bash' }],
+        review: [{ path: 'src/billing/**' }],
+      }),
+    },
+  ]);
+  const rendered = renderDirectivesAdvisory(directives, MAX_DIRECTIVES_RENDER_BUDGET) ?? '';
+  assert.ok(rendered.includes('gated'));
+  assert.ok(rendered.includes('Gate production changes.'));
+  assert.ok(!rendered.includes('deploy'));
+  assert.ok(!rendered.includes('src/billing'));
+});
+
 test('parseDirectives skips a file whose rules fence is JSON null', () => {
   const nulled = `${NO_SECRETS_TEXT}\n\n\`\`\`supervisor\nnull\n\`\`\`\n`;
   const { directives, warnings } = parseDirectives([{ name: 'nulled.md', content: nulled }]);

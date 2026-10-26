@@ -70,6 +70,14 @@ import {
   renderDirectivesAdvisory,
   type Directive,
 } from './src/directives.ts';
+import {
+  compileGates,
+  evaluateApproveGate,
+  evaluateReviewGates,
+  matchApproveGates,
+  parseApprovals,
+  type ApprovalRecord,
+} from './src/gates.ts';
 
 // ── Configuration (session plugin config → environment → defaults) ──
 
@@ -241,6 +249,8 @@ export interface SessionState {
   onDemandAuditCount: number;
   /** Directive ids whose `when` rules matched a tool call (FR-029), deduped for the session. */
   triggeredDirectives: string[];
+  /** Gate keys approved this session (FR-046), deduped so each grant logs once. */
+  grantedGates: Set<string>;
   /**
    * Reasoning-part identities already observed, keyed
    * `sessionID:messageID:partID` (spike 1.1), so duplicate audits are
@@ -264,6 +274,7 @@ function emptySessionState(): SessionState {
     agentReports: [],
     onDemandAuditCount: 0,
     triggeredDirectives: [],
+    grantedGates: new Set(),
     seenParts: new Set(),
   };
 }
@@ -870,6 +881,40 @@ const loadDirectiveFiles = (directory: string): { name: string; content: string 
 };
 
 /**
+ * Reads the engineer's approval records (FR-044) from
+ * `<directory>/.opencode/supervisor/approvals.json`, fresh, for
+ * a call that just matched an approve gate — approvals and
+ * revocations take effect on the next matching call without a
+ * restart. An absent file is the empty record set (absence is
+ * the unapproved state, not an error); any other read failure,
+ * or a parse failure inside `parseApprovals`, returns as an
+ * error string so the gate can fail closed (FR-045) instead of
+ * silently dissolving. I/O lives here (design D1); parsing and
+ * matching are pure in src/gates.ts.
+ */
+const readApprovals = (directory: string): { records: ApprovalRecord[]; error: string | null } => {
+  const approvalsPath = path.join(directory, '.opencode', 'supervisor', 'approvals.json');
+  let raw: string;
+  try {
+    raw = fs.readFileSync(approvalsPath, 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return { records: [], error: null };
+    }
+    return { records: [], error: errorText(error) };
+  }
+  return parseApprovals(raw);
+};
+
+/**
+ * The plugin's own agent-console tools. Gates guard the agent's
+ * effectors — tools that change the world — not the supervision
+ * channel itself: a review gate whose block reason points at
+ * request_audit must not also block request_audit (design D2).
+ */
+const CONSOLE_TOOL_NAMES = new Set(['remind_me', 'forget_reminder', 'recall', 'report', 'request_audit']);
+
+/**
  * Plugin server (design D1): assembles the hook map. The `event` hook
  * runs the full supervision path (tasks 3.2–3.3): synchronous dedupe →
  * strip → deterministic invariants → side-session peer audit →
@@ -913,8 +958,12 @@ const server = async (input: PluginInput, options?: PluginOptions): Promise<Hook
   // D6: compiled enforcement feeds the tool guard (FR-028); the
   // rendered advisory feeds the peer-audit prompt (FR-031).
   const { enforcement, warnings: compileWarnings } = compileEnforcement(directives);
+  // D1/D6: approve and review gates compile from the same
+  // directive set (FR-043..FR-048); their warnings join the
+  // load-time stream.
+  const { gates: compiledGates, warnings: gateWarnings } = compileGates(directives);
   const directivesAdvisory = renderDirectivesAdvisory(directives);
-  for (const warning of [...directiveWarnings, ...compileWarnings]) {
+  for (const warning of [...directiveWarnings, ...compileWarnings, ...gateWarnings]) {
     console.warn(`[supervisor] ${warning}`);
   }
   // Module identity (review finding #20): log the loaded version once
@@ -1094,7 +1143,8 @@ const server = async (input: PluginInput, options?: PluginOptions): Promise<Hook
         // attempt itself is signal; recording happens before the
         // guard decision so neither path loses it.
         const state = sessionState.get(hookInput.sessionID);
-        for (const id of matchTriggers(directives, hookInput.tool, extractPolicyPaths(output.args))) {
+        const argPaths = extractPolicyPaths(output.args);
+        for (const id of matchTriggers(directives, hookInput.tool, argPaths)) {
           if (!state.triggeredDirectives.includes(id)) {
             state.triggeredDirectives.push(id);
             // Design III observability (review round 1): triggers are
@@ -1109,6 +1159,59 @@ const server = async (input: PluginInput, options?: PluginOptions): Promise<Hook
           resolveHookConfig(),
           enforcement
         );
+        // Directive gates (FR-043..FR-047; design D2): evaluated
+        // only when the guard allows, so a forbidden path never
+        // reaches the gate question. Approve gates match purely
+        // first; the approvals file is read fresh ONLY on a match
+        // (un-gated calls pay no I/O), and verification fails
+        // closed on read or parse errors (FR-045) — unlike the
+        // load-time fail-open of FR-032. Review gates then
+        // require a trace reference for every gated path they
+        // touch (FR-047), including on an empty trace. The plugin's own
+        // console tools are exempt (see CONSOLE_TOOL_NAMES): the review
+        // gate's corrective instruction points at request_audit, so the
+        // gate must leave the supervision channel itself open.
+        if (verification.allowed && !CONSOLE_TOOL_NAMES.has(hookInput.tool)) {
+          const rawArgs = JSON.stringify(output.args ?? {});
+          const approveMatch = matchApproveGates(
+            compiledGates.approve,
+            hookInput.tool,
+            rawArgs,
+            argPaths
+          );
+          if (approveMatch !== null) {
+            const approval = readApprovals(input.directory);
+            const decision = evaluateApproveGate(
+              approveMatch,
+              hookInput.tool,
+              approval.records,
+              approval.error
+            );
+            if (decision.allowed) {
+              // FR-046: log the grant once per gate key (design
+              // D6, following the first-trigger precedent).
+              if (!state.grantedGates.has(approveMatch.key)) {
+                state.grantedGates.add(approveMatch.key);
+                console.log(
+                  `[supervisor] gate '${approveMatch.key}' approved for tool '${hookInput.tool}'`
+                );
+              }
+            } else {
+              verification = decision;
+            }
+          }
+          if (verification.allowed && compiledGates.review.length > 0) {
+            const reviewDecision = evaluateReviewGates(
+              compiledGates.review,
+              hookInput.tool,
+              argPaths,
+              state.verifiedSteps
+            );
+            if (!reviewDecision.allowed) {
+              verification = reviewDecision;
+            }
+          }
+        }
       } catch (error) {
         // Fail-open (FR-005): guard infrastructure must not break the session.
         console.error('[supervisor] tool guard failed open:', errorText(error));

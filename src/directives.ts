@@ -1,6 +1,7 @@
 /**
  * Engineer-directive parsing, compilation, matching, and rendering
- * for the engineer console (FR-026 .. FR-032).
+ * for the engineer console (FR-026 .. FR-032), including the
+ * approve-gate and review-gate rule kinds (FR-043 .. FR-048).
  *
  * Directives are engineer-authored policy riding the same
  * session-state layer as the audit loop and the agent console:
@@ -23,11 +24,34 @@ export interface TriggerRule {
   path?: string;
 }
 
+/**
+ * An approval-gate rule (FR-043): matching tool calls are held
+ * until the engineer records the gate key in the approvals file.
+ * At least one of tool/path/pattern is required (an empty rule
+ * would match every call); `id` overrides the derived gate key.
+ */
+export interface ApproveRule {
+  id?: string;
+  tool?: string;
+  path?: string;
+  pattern?: string;
+}
+
+/**
+ * A review-gate rule (FR-047): matching tool calls are held
+ * until the verified trace references the touched path.
+ */
+export interface ReviewRule {
+  path: string;
+}
+
 export interface Directive {
   id: string;
   text: string;
   enforce?: EnforcementRule[];
   when?: TriggerRule[];
+  approve?: ApproveRule[];
+  review?: ReviewRule[];
 }
 
 /** Minimal render shape consumed by the memo and audit prompt. */
@@ -76,6 +100,8 @@ export interface ParseDirectivesResult {
 interface RawRules {
   enforce?: unknown;
   when?: unknown;
+  approve?: unknown;
+  review?: unknown;
 }
 
 const normalizeEnforcementRules = (
@@ -143,6 +169,79 @@ const normalizeTriggerRules = (
 };
 
 /**
+ * Normalize `approve` gate rules (FR-043, design D7): strings are
+ * trimmed; a rule needs at least one of tool/path/pattern (an empty
+ * rule would match every call) and is dropped otherwise.
+ */
+const normalizeApproveRules = (
+  raw: unknown
+): { rules: ApproveRule[]; dropped: number } => {
+  if (raw === undefined || raw === null) return { rules: [], dropped: 0 };
+  if (!Array.isArray(raw)) return { rules: [], dropped: 1 };
+  const rules: ApproveRule[] = [];
+  let dropped = 0;
+  for (const entry of raw.slice(0, MAX_RULES_PER_DIRECTIVE)) {
+    if (typeof entry !== 'object' || entry === null) {
+      dropped += 1;
+      continue;
+    }
+    const record = entry as Record<string, unknown>;
+    const rule: ApproveRule = {};
+    if (typeof record.id === 'string' && record.id.trim().length > 0) {
+      rule.id = record.id.trim();
+    }
+    if (typeof record.tool === 'string' && record.tool.trim().length > 0) {
+      rule.tool = record.tool.trim();
+    }
+    if (typeof record.path === 'string' && record.path.trim().length > 0) {
+      rule.path = record.path.trim();
+    }
+    if (typeof record.pattern === 'string' && record.pattern.trim().length > 0) {
+      rule.pattern = record.pattern.trim();
+    }
+    if (rule.tool === undefined && rule.path === undefined && rule.pattern === undefined) {
+      dropped += 1;
+      continue;
+    }
+    rules.push(rule);
+  }
+  if (raw.length > MAX_RULES_PER_DIRECTIVE) {
+    dropped += raw.length - MAX_RULES_PER_DIRECTIVE;
+  }
+  return { rules, dropped };
+};
+
+/**
+ * Normalize `review` gate rules (FR-047, design D7): a rule is a
+ * path glob and nothing else — a review rule without a path is
+ * meaningless and is dropped.
+ */
+const normalizeReviewRules = (
+  raw: unknown
+): { rules: ReviewRule[]; dropped: number } => {
+  if (raw === undefined || raw === null) return { rules: [], dropped: 0 };
+  if (!Array.isArray(raw)) return { rules: [], dropped: 1 };
+  const rules: ReviewRule[] = [];
+  let dropped = 0;
+  for (const entry of raw.slice(0, MAX_RULES_PER_DIRECTIVE)) {
+    if (typeof entry !== 'object' || entry === null) {
+      dropped += 1;
+      continue;
+    }
+    const record = entry as Record<string, unknown>;
+    if (typeof record.path !== 'string' || record.path.trim().length === 0) {
+      dropped += 1;
+      continue;
+    }
+    rules.push({ path: record.path.trim() });
+  }
+  if (raw.length > MAX_RULES_PER_DIRECTIVE) {
+    dropped += raw.length - MAX_RULES_PER_DIRECTIVE;
+  }
+  return { rules, dropped };
+};
+
+/**
  * Parse directive files (FR-026, FR-027). Each file's markdown body
  * is the advisory text; the first ```supervisor-fenced block holds a
  * JSON rules object. The file id is the filename without `.md`.
@@ -187,6 +286,8 @@ export const parseDirectives = (files: DirectiveFile[]): ParseDirectivesResult =
     const trimmed = trimmedText.slice(0, MAX_DIRECTIVE_TEXT);
     const enforce = normalizeEnforcementRules(rawRules.enforce);
     const when = normalizeTriggerRules(rawRules.when);
+    const approve = normalizeApproveRules(rawRules.approve);
+    const review = normalizeReviewRules(rawRules.review);
     if (enforce.dropped > 0) {
       warnings.push(
         `directive '${id}': ${enforce.dropped} enforce rule(s) skipped (invalid or beyond the cap of ${MAX_RULES_PER_DIRECTIVE})`
@@ -197,7 +298,23 @@ export const parseDirectives = (files: DirectiveFile[]): ParseDirectivesResult =
         `directive '${id}': ${when.dropped} when rule(s) skipped (invalid or beyond the cap of ${MAX_RULES_PER_DIRECTIVE})`
       );
     }
-    if (!trimmed && enforce.rules.length === 0 && when.rules.length === 0) {
+    if (approve.dropped > 0) {
+      warnings.push(
+        `directive '${id}': ${approve.dropped} approve rule(s) skipped (invalid or beyond the cap of ${MAX_RULES_PER_DIRECTIVE})`
+      );
+    }
+    if (review.dropped > 0) {
+      warnings.push(
+        `directive '${id}': ${review.dropped} review rule(s) skipped (invalid or beyond the cap of ${MAX_RULES_PER_DIRECTIVE})`
+      );
+    }
+    if (
+      !trimmed &&
+      enforce.rules.length === 0 &&
+      when.rules.length === 0 &&
+      approve.rules.length === 0 &&
+      review.rules.length === 0
+    ) {
       warnings.push(
         `directive file '${file.name}' has neither advisory text nor rules; file skipped`
       );
@@ -208,6 +325,8 @@ export const parseDirectives = (files: DirectiveFile[]): ParseDirectivesResult =
       text: trimmed,
       ...(enforce.rules.length > 0 ? { enforce: enforce.rules } : {}),
       ...(when.rules.length > 0 ? { when: when.rules } : {}),
+      ...(approve.rules.length > 0 ? { approve: approve.rules } : {}),
+      ...(review.rules.length > 0 ? { review: review.rules } : {}),
     });
   }
   return { directives, warnings };
@@ -246,6 +365,8 @@ export const parseOptionsDirectives = (raw: unknown): ParseDirectivesResult => {
     const text = rawText.slice(0, MAX_DIRECTIVE_TEXT);
     const enforce = normalizeEnforcementRules(record.enforce);
     const when = normalizeTriggerRules(record.when);
+    const approve = normalizeApproveRules(record.approve);
+    const review = normalizeReviewRules(record.review);
     if (enforce.dropped > 0) {
       warnings.push(
         `directive '${id}': ${enforce.dropped} enforce rule(s) skipped (invalid or beyond the cap of ${MAX_RULES_PER_DIRECTIVE})`
@@ -256,7 +377,23 @@ export const parseOptionsDirectives = (raw: unknown): ParseDirectivesResult => {
         `directive '${id}': ${when.dropped} when rule(s) skipped (invalid or beyond the cap of ${MAX_RULES_PER_DIRECTIVE})`
       );
     }
-    if (!text && enforce.rules.length === 0 && when.rules.length === 0) {
+    if (approve.dropped > 0) {
+      warnings.push(
+        `directive '${id}': ${approve.dropped} approve rule(s) skipped (invalid or beyond the cap of ${MAX_RULES_PER_DIRECTIVE})`
+      );
+    }
+    if (review.dropped > 0) {
+      warnings.push(
+        `directive '${id}': ${review.dropped} review rule(s) skipped (invalid or beyond the cap of ${MAX_RULES_PER_DIRECTIVE})`
+      );
+    }
+    if (
+      !text &&
+      enforce.rules.length === 0 &&
+      when.rules.length === 0 &&
+      approve.rules.length === 0 &&
+      review.rules.length === 0
+    ) {
       warnings.push(`options.directives[${index}] ('${id}') has neither text nor rules; skipped`);
       return;
     }
@@ -265,6 +402,8 @@ export const parseOptionsDirectives = (raw: unknown): ParseDirectivesResult => {
       text,
       ...(enforce.rules.length > 0 ? { enforce: enforce.rules } : {}),
       ...(when.rules.length > 0 ? { when: when.rules } : {}),
+      ...(approve.rules.length > 0 ? { approve: approve.rules } : {}),
+      ...(review.rules.length > 0 ? { review: review.rules } : {}),
     });
   });
   return { directives, warnings };
