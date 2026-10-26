@@ -70,7 +70,7 @@
 
 ## 4. Docs and release
 
-- [ ] 4.1 Update README (§7.5 approve/review rule kinds +
+- [x] 4.1 Update README (§7.5 approve/review rule kinds +
       approvals file format and expiry semantics, §6
       approvals path, §9 trust note for the approvals file,
       §10 roadmap item complete), AGENTS.md (overview,
@@ -79,7 +79,7 @@
       test counts. Verify: grep sweep — every enumeration
       of rule kinds, memo sections, and test commands
       matches the tree; both test runners green.
-- [ ] 4.2 File doc issues per convention (blog issue for
+- [x] 4.2 File doc issues per convention (blog issue for
       2.4.0, tutorial #4 scope comment, docs-verification
       issue). Verify: issue numbers recorded in the
       Workflow follow-up section below.
@@ -101,8 +101,10 @@
 - Archive the change after the PR merges (opsx archive
   workflow; delta specs sync to `openspec/specs/`).
 - Extend tutorial issue #4 with gate authoring (approve +
-  review rules, approvals file lifecycle).
-- Blog follow-up for 2.4.0 if not filed in 4.2.
+  review rules, approvals file lifecycle). Done in 4.2:
+  issuecomment-6405743608.
+- Blog follow-up for 2.4.0: filed in 4.2 as #25. Docs
+  verification backstop: #26.
 - Older unarchived changes (agent-reminders,
   rebrand-supervisor, audit-supervisor) can be swept the
   same way as supervisor-tools was.
