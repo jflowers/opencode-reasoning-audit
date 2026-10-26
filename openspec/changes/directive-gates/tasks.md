@@ -2,7 +2,7 @@
 
 ## 1. Directive parsing for gate rules
 
-- [ ] 1.1 Add `ApproveRule`/`ReviewRule` types and
+- [x] 1.1 Add `ApproveRule`/`ReviewRule` types and
       `normalizeApproveRules`/`normalizeReviewRules` to
       `src/directives.ts`; wire both into `parseDirectives`
       and `parseOptionsDirectives` (validation: approve needs
@@ -12,7 +12,7 @@
       module tests in `test/directives.test.ts` parse
       approve/review fences, options tuples, invalid-rule
       warnings, and per-kind bounds.
-- [ ] 1.2 Extend `Directive` with optional `approve`/`review`
+- [x] 1.2 Extend `Directive` with optional `approve`/`review`
       arrays and confirm advisory rendering stays unchanged
       (gate internals never render). Verify: memo test shows
       identical advisory text for a directive with gate
@@ -20,7 +20,7 @@
 
 ## 2. Pure gate module
 
-- [ ] 2.1 Create `src/gates.ts` with `MAX_APPROVALS`,
+- [x] 2.1 Create `src/gates.ts` with `MAX_APPROVALS`,
       `ApprovalRecord`, `CompiledGates`/`compileGates`
       (glob + regex compilation, invalid patterns
       skip-and-warn), and `matchApproveGates` (tool CI,
@@ -30,14 +30,14 @@
       Verify: module tests in `test/gates.test.ts` cover
       key derivation, each matcher field, and non-matching
       calls.
-- [ ] 2.2 Add `parseApprovals` (JSON array shape
+- [x] 2.2 Add `parseApprovals` (JSON array shape
       `{gate, note?, expires?}`, MAX_APPROVALS most-recent
       bound, malformed entries skipped) and
       `approvalMatches` (gate equality, YYYY-MM-DD expiry
       skipping, past dates never match). Verify: module
       tests cover valid/expired/over-cap files and
       malformed entries.
-- [ ] 2.3 Add `evaluateReviewGates` (gate-matched paths
+- [x] 2.3 Add `evaluateReviewGates` (gate-matched paths
       must be referenced by a verified step, FR-011
       contains semantics; empty trace blocks; block reason
       names path + audit-first instruction). Verify: module
@@ -45,7 +45,7 @@
 
 ## 3. Hook wiring
 
-- [ ] 3.1 In `index.ts`: compile gates at server start
+- [x] 3.1 In `index.ts`: compile gates at server start
       alongside `compileEnforcement`; in
       `tool.execute.before`, after the existing guard
       verdict, evaluate approve gates (two-phase: pure match,
@@ -57,12 +57,12 @@
       admits, revocation blocks on next call, malformed
       file blocks with error, absent file blocks with
       instruction.
-- [ ] 3.2 Add `grantedGates: Set<string>` to SessionState
+- [x] 3.2 Add `grantedGates: Set<string>` to SessionState
       (clear on dispose); log the first grant per gate key
       (`[supervisor] gate '<key>' approved for tool
       '<tool>'`). Verify: hook test asserts exactly one log
       line across two approved calls through the same gate.
-- [ ] 3.3 Confirm review-gate synergy with `request_audit`:
+- [x] 3.3 Confirm review-gate synergy with `request_audit`:
       a review-gated call blocked on empty trace succeeds
       after a passing on-demand audit references the path.
       Verify: hook test drives request_audit then retries
