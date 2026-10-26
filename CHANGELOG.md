@@ -3,6 +3,19 @@
 All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Changed
+
+- README overhauled: lede-first opening, a "what it catches" failure
+  mode table, quickstart promoted to Section 3, a mermaid diagram of
+  the supervision loop, and historical content (research origin, 1.x
+  migration table, future directions) compressed into a bottom
+  appendix. The shipped-roadmap section was removed — the feature list
+  and this changelog own that history. Docs-only: no behavior changed;
+  every configuration knob, tool, rule kind, and limitation remains
+  documented (#28).
+
 ## [2.4.0] - 2026-10-26
 
 Spec deltas:

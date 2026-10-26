@@ -1,219 +1,72 @@
 # opencode-supervisor
 
-An OpenCode middleware plugin that supervises AI agents while they work: it strips persuasive narrative from Chain-of-Thought steps, runs an independent peer audit in a side session, steers or interrupts the supervised session when a step fails, blocks reward-hacking and engineer-directive-violating tool calls, and holds approve-gated and review-gated calls for engineer sign-off, before they execute, and keeps the agent oriented with a session memo (goal, directives, reminders, solved items, agent reports, recent critiques).
+A supervisor for your OpenCode agent. While the agent works, this plugin
+audits every completed reasoning step, steers or interrupts the session
+when a step is wrong, blocks reward-hacking and out-of-bounds tool calls
+before they execute, and keeps the agent oriented with a running memo of
+the goal, reminders, and engineer directives.
 
-Formerly `opencode-reasoning-audit` (1.x). The repo and plugin were renamed as the project grows from a reasoning auditor into a supervision plane; see [Section 6.2](#62-migrating-from-1x) for the migration table.
-
-The supervision plane has one automated surface — the audit loop below — and two consoles: an **agent console** of self-serve tools (`remind_me` / `forget_reminder` / `recall` / `report` / `request_audit`, [Section 7.4](#74-agent-console)) and an **engineer console** of directive files ([Section 7.5](#75-engineer-console-directives)), all writing one shared session-state layer.
-
----
-
-## 1. Overview of the Technique
-
-When a primary AI model solves a problem, it produces a Chain-of-Thought (CoT) and tool calls. Standard AI workflows only check the final output. If Step 2 of a 10-step plan contains a logic error, the AI builds Steps 3 through 10 on a false assumption.
-
-This plugin implements **Process Supervision** and **Automated Self-Correction** inside OpenCode. It registers OpenCode plugin hooks and runs this loop:
-
-1. **Observe completed reasoning steps**: The `event` hook receives `message.part.updated` events. When a reasoning part completes (its `time.end` is set), the plugin reads its full text. Each part is audited exactly once, deduplicated by session, message, and part identity.
-2. **Strip the narrative text (`stripNarrative`)**: Persuasive conversational text (for example, *"Obviously, this formula is optimal"*) often hides math and logic errors. The plugin removes conversational text and keeps only formal steps (code blocks, equations, and explicit rules).
-3. **Audit the formal steps (`runPeerAudit`)**: Deterministic invariant checks run first — arithmetic misstatements, off-by-one loop bounds, and reward-hacking markers fail the audit with no model call. If the invariants pass, an independent auditor model checks the step in a dedicated side session. The audit prompt carries the session goal, so the auditor can also flag scope drift. Steps that pass are recorded in a **verified trace**.
-4. **Steer or interrupt**: A failed audit is classified `minor` or `severe`:
-   - **Minor** (arithmetic, off-by-one, scope drift): the critique is delivered to the supervised session as a synthetic user message. The agent incorporates it at its next step and self-corrects. Deliveries are bounded by `maxRegenerations` per session; critiques over the bound are recorded without delivery.
-   - **Severe** (reward hacking): the session is interrupted (`session.abort`) first, then the critique is delivered the same way. The whole intervention — the interrupt and the delivery — is bounded by the same `maxRegenerations` per session; past the bound, severe findings are recorded without interrupting or delivering.
-
-Two more surfaces complete the supervision:
-
-- **Tool guard** (`tool.execute.before`): before any tool runs, the plugin blocks reward-hacking patterns, engineer-directive violations (forbidden paths and command patterns), and file paths that do not appear in the verified trace. It also holds `approve`-gated calls for engineer approval and `review`-gated calls for a passed peer audit. A block throws, so the model receives the reason as a tool error it can act on. An empty trace or rule set never blocks.
-- **Supervisor memo** (`experimental.chat.system.transform`): before each model call, the plugin appends a bounded memo — session goal, active engineer directives, reminders, recently solved items, agent reports, recent critiques — to the system prompt. This is a plugin-side append: whether the model actually receives the memo depends on the transport honoring pushed secondary system messages (see Section 9).
-
-The supervised agent also gets self-serve tools (`Hooks.tool`): `remind_me` / `forget_reminder` keep durable facts — dead ends, environment quirks, decisions, user constraints — in the supervision state, where they ride the memo and survive context compaction; `recall` reads the full retained state beyond the memo's render caps; `report` records blockers, deviations, outcomes, and notes for the engineer; and `request_audit` asks for an immediate peer audit of a stated claim (Section 7.4).
+Coding agents fail in predictable ways: an arithmetic slip in step 2 of
+a 10-step plan quietly poisons steps 3 through 10; a stuck agent "fixes"
+a failing test by adding `.skip()`; an agent asked to fix a bug starts
+refactoring the module. Standard workflows check only the final output —
+by then the damage is load-bearing. opencode-supervisor checks the work
+while it happens.
 
 ---
 
-## 2. Origin of the Technique
+## 1. What You Get
 
-The audit module at this plugin's core is based on the multi-agent reasoning audit and repair framework described in:
-
-- **Source**: [A new framework teaches AI models to audit and repair each other's reasoning, improving accuracy (VentureBeat)](https://venturebeat.com/orchestration/a-new-framework-teaches-ai-models-to-audit-and-repair-each-others-reasoning-improving-accuracy)
-
-### Why This Framework Works
-
-Research shows that when one AI model reviews the full Chain-of-Thought of another AI model, the reviewer model often agrees with wrong answers. This happens because the primary model writes confident narrative text around its mistakes.
-
-The audit-and-repair framework solves this problem in two ways:
-1. **Separate Logic from Narrative**: It strips the rhetorical narrative from the reasoning chain so the auditor model sees only the raw logic, math, and code.
-2. **Step-Level Repair**: When the auditor finds a broken step, it tells the primary model the exact step number and the exact formal error. The primary model then repairs its reasoning from that step forward.
-
----
-
-## 3. General Uses
-
-You can use this technique in any workflow where an AI model performs multi-step reasoning:
-
-- **Mathematical and Financial Calculations**: Catch wrong arithmetic (for example, `24 * 15 = 340`) in budgets, capacity plans, and pricing tables before the AI writes the final report.
-- **Data Analysis and Scientific Pipelines**: Verify that unit conversions, statistical formulas, and data filters match the input data schema.
-- **Compliance and Policy Checks**: Confirm that every step in a decision chain obeys strict regulatory rules before the system sends a response to a user.
-- **Multi-Step Planning**: Detect when a later step in a plan contradicts an earlier constraint.
+- **[The audit loop](#41-the-supervision-loop)** — every completed
+  reasoning step is stripped of persuasive narrative and audited by
+  an independent peer model in a side session. Failures steer the
+  agent; severe failures interrupt it first.
+- **[The tool guard](#42-the-tool-guard)** — reward-hacking calls,
+  directive violations, and hallucinated file paths are blocked
+  before a tool executes; gated calls wait for engineer sign-off.
+- **[The supervisor memo](#43-the-supervisor-memo)** — a bounded memo
+  (goal, directives, reminders, solved items, reports, critiques)
+  rides the system prompt every turn.
+- **[The agent console](#5-the-agent-console)** — five self-serve
+  tools: durable reminders, full-state recall, engineer reports,
+  on-demand audits.
+- **[The engineer console](#6-the-engineer-console)** — directive
+  files pairing advisory text with machine rules (`when`, `enforce`,
+  `approve`, `review`) that shape the memo, the audit criteria, and
+  the tool guard.
 
 ---
 
-## 4. Uses in Software Development
+## 2. What It Catches
 
-In software engineering, coding agents frequently make subtle logic errors or take unsafe shortcuts. This plugin stops those errors at runtime:
+| Failure mode | Example | What the supervisor does |
+| :--- | :--- | :--- |
+| Arithmetic errors | `24 * 15 = 340` in a budget step | An invariant fails the audit with no model call; the critique names the step |
+| Off-by-one bounds | `for (let i = 0; i <= array.length; i++)` | Flagged by an invariant or the peer audit; the agent self-corrects |
+| Unsafe code | SQL string interpolation, unsafe shell commands | The peer audit flags the step before the code reaches disk |
+| Reward hacking | `.skip()` on a failing test, deleted asserts, `git commit --no-verify` | The tool guard blocks the call before execution |
+| Hallucinated paths | Editing a file never named in verified reasoning | The tool guard blocks the write unless the verified trace names the path |
+| Scope drift | Asked to fix a bug, starts refactoring the module | The audit prompt carries the session goal; drift is a finding |
 
-1. **Catch Boundary and Formula Bugs**: Detect off-by-one loop conditions (for example, `for (let i = 0; i <= array.length; i++)`) or wrong algorithms (such as using linear multiplication when the specification requires exponential backoff).
-2. **Prevent Security Vulnerabilities**: Catch raw string interpolation in SQL queries (`SELECT * FROM users WHERE id = ${id}`) or unsafe shell commands before the agent writes the code to disk.
-3. **Stop Reward Hacking**: When a coding agent cannot fix a failing test, it sometimes tries to cheat ("reward hack"). For example, the agent may add `.skip()` to a test, delete an `assert` statement, or run `git commit --no-verify`. The tool guard blocks these actions before the tool runs.
-4. **Block Hallucinated File Paths**: Ensure that the coding agent cannot modify or delete a file unless the verified reasoning steps explicitly name that file.
-
----
-
-## 5. Architecture
-
-### 5.1 Hook Map
-
-The plugin entry (`index.ts`) default-exports a `PluginModule` (`{ id, server }`, id `opencode-supervisor`); `server(input, options)` returns this hook map (options carry engineer directives through tuple registration — Section 7.5):
-
-| Hook | Purpose |
-| :--- | :--- |
-| `event` | Observes completed reasoning parts (`message.part.updated`), deduplicates them, strips narrative, runs the invariants and the side-session peer audit, records passed steps in the verified trace, and routes failures to critique delivery. |
-| `chat.message` | Captures the first user message of the session as the goal. The goal is never replaced. |
-| `tool.execute.before` | Tool guard: blocks reward-hacking tool calls, engineer-directive violations, and file paths absent from the verified trace (never blocks when the trace is empty); holds approve-gated calls for engineer approval and review-gated calls for a passed peer audit (agent-console tools are exempt so `request_audit` stays reachable); records directive triggers. |
-| `tool.execute.after` | Appends a solved item (tool name + short outcome) to a bounded log. |
-| `tool` | Agent console: registers the tools the supervised agent can call — `remind_me` / `forget_reminder` (durable reminders), `recall` (full retained state), `report` (self-reported events), and `request_audit` (on-demand peer audit) (Section 7.4). |
-| `experimental.chat.system.transform` | Appends the supervisor memo to the system prompt. Degrades gracefully (memo-less operation) when the hook is absent. |
-| `dispose` | Clears all in-process session state. |
-
-### 5.2 Critique Delivery
-
-Both severities deliver the critique through `session.promptAsync` as a synthetic-marked user part, prefixed `[supervisor]`. Severe findings interrupt first — `session.abort` runs before the delivery, or the abort would kill the corrective turn it exists to start. The whole intervention is bounded by `maxRegenerations` per session: once the bound is spent, critiques (severe included) are recorded without delivery and no further aborts fire. Transport failures are likewise recorded without delivery.
-
-### 5.3 Auditor Side Session
-
-The peer audit runs in a dedicated side session created for each audit through the OpenCode client (`session.prompt`), using the configured `auditorModel` / `auditorVariant`. Audit traffic never enters the supervised conversation. Auditor errors fail open: the step passes, the error is logged, and supervision continues.
-
-### 5.4 Modules
-
-| File | Responsibility |
-| :--- | :--- |
-| `index.ts` | Hook layer: registers the hooks, owns the per-session state Maps, resolves configuration, drives the auditor side session and critique delivery. |
-| `src/stripper.ts` | Narrative stripping (`code_and_math` / `balanced` / `strict`). |
-| `src/auditor.ts` | Peer audit: deterministic invariants, injected-model LLM audit, severity classification, goal-aware prompt, model/variant config resolution. |
-| `src/tool-guard.ts` | Tool intent verification: reward-hacking patterns, engineer-directive enforcement, and the verified-trace file-path check, with actionable block reasons. |
-| `src/memo.ts` | Pure memo builder: bounded goal / directives / reminders / solved-items / reports / critiques sections; produces no memo when there is nothing to show. |
-| `src/reminders.ts` | Agent-console reminders: pure storage (add, clear, prepare text) and memo rendering for the `remind_me` / `forget_reminder` tools. |
-| `src/console.ts` | Agent-console second slice: report records (storage, text hygiene, bounds), the `Agent reports` memo section, recall views over the full retained state, and the storage-retention constants. |
-| `src/directives.ts` | Engineer directives: pure parsing (markdown + rules fence), glob compilation, enforcement evaluation, trigger matching, and bounded rendering. |
-| `src/gates.ts` | Engineer-console gate rules: approve-gate and review-gate compilation and evaluation, approvals parsing, and expiry matching. |
-
-`src/` modules are pure and testable — they import no OpenCode APIs. Session state and OpenCode hooks live only in `index.ts`. State (goal, verified steps, critique count, solved items, critique log, reminders, agent reports, on-demand audit count, triggered directive ids, granted gate keys) is held in module-level Maps keyed by session ID and dies with the opencode process; nothing is persisted.
+The loop is not code-specific: the same technique catches bad math in
+financial calculations, unit-conversion errors in data pipelines, and
+plan steps that contradict earlier constraints.
 
 ---
 
-## 6. Configuration
-
-Settings resolve in order of precedence at runtime:
-
-1. **Environment variables** — the `OPENCODE_SUPERVISOR_*` names in the table below.
-2. **Defaults** — the `pluginConfig` object at the top of `index.ts`.
-
-> **Note on session plugin config**: the resolver also accepts a
-> session-plugin-config override
-> (`config.plugins['opencode-supervisor']` on a session object),
-> but no runtime hook payload carries one — every hook receives only a
-> `sessionID`, and the `chat.params` hook's input exposes session,
-> agent, model, provider, and message fields with no plugin config
-> (verified against `@opencode-ai/plugin` 1.19.4). That tier is
-> reachable only from code that constructs a session object itself;
-> configure through the environment instead.
-
-| Knob | Environment variable | Default | Description |
-| :--- | :--- | :--- | :--- |
-| `auditorModel` | `OPENCODE_SUPERVISOR_MODEL` | `google/gemini-3.8-flash` | The provider and model slug for the auditor side session. Format: `<provider>/<model-id>` (for example, `openai/o3-mini`, `anthropic/claude-3-7-sonnet`, or `google/gemini-3.8-flash`). |
-| `auditorVariant` | `OPENCODE_SUPERVISOR_VARIANT` | `low` | The reasoning effort passed to the auditor model. Allowed values: `minimal`, `low`, `medium`, `high`, `default`. |
-| `maxRegenerations` | `OPENCODE_SUPERVISOR_MAX_REGENERATIONS` | `2` | The maximum number of interventions per session — delivered critiques and severe interrupts share this bound. Past the bound, critiques (severe included) are recorded without delivery or interrupt. |
-| `stripMode` | `OPENCODE_SUPERVISOR_STRIP_MODE` | `code_and_math` | Controls how `stripNarrative()` filters the Chain-of-Thought before the audit. See Section 6.1 below. |
-| `blockRewardHacking` | `OPENCODE_SUPERVISOR_BLOCK_REWARD_HACKING` | `true` | When `true`, the tool guard blocks tool calls that contain `--no-verify`, `.skip(`, `expect(true).toBe(true)`, or test deletion commands. |
-| `requireStepReferenceInTools` | `OPENCODE_SUPERVISOR_REQUIRE_STEP_REFERENCE_IN_TOOLS` | `true` | When `true`, the tool guard blocks tool calls whose file-path arguments do not appear in the verified reasoning trace. Never blocks when the trace is empty. |
-| `memoLimits.maxSolvedItems` | `OPENCODE_SUPERVISOR_MEMO_MAX_SOLVED_ITEMS` | `5` | Cap on solved items shown in the memo. Storage retains more (50) for `recall`; this knob bounds the rendered view. |
-| `memoLimits.maxCritiques` | `OPENCODE_SUPERVISOR_MEMO_MAX_CRITIQUES` | `3` | Cap on critiques shown in the memo. Storage retains more (30) for `recall`; this knob bounds the rendered view. |
-| `memoLimits.maxReminders` | `OPENCODE_SUPERVISOR_MEMO_MAX_REMINDERS` | `10` | Cap on reminders kept in state and shown in the memo (the most recent are kept). |
-| `memoLimits.maxReports` | `OPENCODE_SUPERVISOR_MEMO_MAX_REPORTS` | `5` | Cap on agent reports kept in state and shown in the memo (the most recent are kept). |
-| `maxOnDemandAudits` | `OPENCODE_SUPERVISOR_MAX_ON_DEMAND_AUDITS` | `8` | Per-session cap on audits requested through the `request_audit` tool. The automatic audit loop is unaffected. |
-
-Gate approvals are not a knob: `approve` rules read `.opencode/supervisor/approvals.json` fresh at each gated call, so approving or revoking takes effect on the next tool call with no restart (Section 7.5).
-
-Environment variable values: booleans accept exactly `true` or `false`; numbers must be non-negative; `stripMode` must be one of the three mode names. Invalid values fall through to the next precedence tier.
+## 3. Quickstart
 
 ```bash
-export OPENCODE_SUPERVISOR_MODEL="google/gemini-3.8-flash"
-export OPENCODE_SUPERVISOR_VARIANT="low"
-export OPENCODE_SUPERVISOR_MAX_REGENERATIONS=2
-export OPENCODE_SUPERVISOR_STRIP_MODE=code_and_math
-export OPENCODE_SUPERVISOR_BLOCK_REWARD_HACKING=true
-export OPENCODE_SUPERVISOR_REQUIRE_STEP_REFERENCE_IN_TOOLS=true
-export OPENCODE_SUPERVISOR_MEMO_MAX_SOLVED_ITEMS=5
-export OPENCODE_SUPERVISOR_MEMO_MAX_CRITIQUES=3
-export OPENCODE_SUPERVISOR_MEMO_MAX_REMINDERS=10
-export OPENCODE_SUPERVISOR_MEMO_MAX_REPORTS=5
-export OPENCODE_SUPERVISOR_MAX_ON_DEMAND_AUDITS=8
-```
-
-### 6.1 Understanding `stripMode`
-
-The `stripMode` setting controls how much text `stripNarrative()` removes from each reasoning step:
-
-- **`code_and_math` (Default)**: Retains steps that contain code blocks (```` ` or inline `` `...` ``), math operators (`+`, `-`, `*`, `/`, `=`, `<=`), SQL keywords, or variable assignments (`const x =`, `let y =`). Removes all pure prose sentences. Use this mode for general coding and math tasks.
-- **`balanced`**: Retains everything in `code_and_math`, and also retains prose steps that state formal specifications, big-O complexity (`O(n)`), preconditions, invariants, or file paths. Removes conversational filler. Use this mode for architecture and security reviews.
-- **`strict`**: Retains **only** fenced code blocks (````...````) and explicit equations (`24 * 15 = 360`). Removes all prose text. Use this mode when you want the auditor to see zero natural language.
-
-### 6.2 Migrating from 1.x
-
-Version 2.0.0 renames the plugin and its configuration surface. The break is clean: 1.x names are not read as aliases.
-
-| 1.x variable | 2.0.0 variable |
-| :--- | :--- |
-| `OPENCODE_AUDITOR_MODEL` | `OPENCODE_SUPERVISOR_MODEL` |
-| `OPENCODE_AUDITOR_VARIANT` | `OPENCODE_SUPERVISOR_VARIANT` |
-| `OPENCODE_AUDITOR_MAX_REGENERATIONS` | `OPENCODE_SUPERVISOR_MAX_REGENERATIONS` |
-| `OPENCODE_AUDITOR_STRIP_MODE` | `OPENCODE_SUPERVISOR_STRIP_MODE` |
-| `OPENCODE_AUDITOR_BLOCK_REWARD_HACKING` | `OPENCODE_SUPERVISOR_BLOCK_REWARD_HACKING` |
-| `OPENCODE_AUDITOR_REQUIRE_STEP_REFERENCE_IN_TOOLS` | `OPENCODE_SUPERVISOR_REQUIRE_STEP_REFERENCE_IN_TOOLS` |
-| `OPENCODE_AUDITOR_MEMO_MAX_SOLVED_ITEMS` | `OPENCODE_SUPERVISOR_MEMO_MAX_SOLVED_ITEMS` |
-| `OPENCODE_AUDITOR_MEMO_MAX_CRITIQUES` | `OPENCODE_SUPERVISOR_MEMO_MAX_CRITIQUES` |
-| `OPENCODE_AUDITOR_ENDPOINT` | *(removed in 1.0 — no equivalent; audits run through the side session)* |
-
-Also renamed: the plugin id and session config key (`opencode-reasoning-audit` → `opencode-supervisor`) and the GitHub repository (old URLs redirect automatically).
-
----
-
-## 7. Installation and Usage
-
-### 7.1 Install and Test
-
-```bash
-# 1. Clone this repository and install dependencies
-#    (the plugin entry imports @opencode-ai/plugin)
 git clone https://github.com/jflowers/opencode-supervisor.git
 cd opencode-supervisor
-bun install
-
-# 2. Run the unit tests (works with Bun or Node 22+)
-bun test
-# Or with Node:
-node --test test/audit.test.ts test/memo.test.ts test/reminders.test.ts test/directives.test.ts test/console.test.ts test/gates.test.ts
-
-# 3. Register the plugin with OpenCode (one of the options below)
-
-# 4. Start OpenCode
-opencode
+bun install        # the plugin entry imports @opencode-ai/plugin
 ```
 
-### 7.2 Registering with OpenCode
+Register the plugin through one of OpenCode's three real mechanisms:
 
-Register the plugin through any of OpenCode's real mechanisms:
-
-**Option A — project config `plugin` array** (this repository's own pattern). Add the entry to the `opencode.json` of the project OpenCode runs in. From inside this repository:
+**Option A — project config `plugin` array** (this repository's own
+pattern). Add the entry to the `opencode.json` of the project OpenCode
+runs in:
 
 ```json
 {
@@ -223,7 +76,9 @@ Register the plugin through any of OpenCode's real mechanisms:
 }
 ```
 
-Relative specs resolve against the config file's directory. From a different project, use an absolute path to this repository's `index.ts`.
+Relative specs resolve against the config file's directory. From a
+different project, use an absolute path to this repository's
+`index.ts`.
 
 **Option B — the `opencode plugin` command**:
 
@@ -231,103 +86,155 @@ Relative specs resolve against the config file's directory. From a different pro
 opencode plugin /absolute/path/to/opencode-supervisor
 ```
 
-Registers the plugin in the current project's `.opencode/opencode.json` (`--global` for the global config). Pass an absolute path: a relative spec is written verbatim, then resolves against `.opencode/`, where it points nowhere and is silently dropped.
+Registers in the current project's `.opencode/opencode.json`
+(`--global` for the global config). Pass an absolute path: a relative
+spec is written verbatim, then resolves against `.opencode/`, where it
+points nowhere and is silently dropped.
 
-**Option C — auto-discovery**. OpenCode loads every `*.ts` / `*.js` file directly under a `plugin/` or `plugins/` directory in a config directory (for example `.opencode/plugins/`). For this repository's entry, use a symlink rather than a copy: the entry imports `./src/*`, and a copied file would lose those relative imports.
+**Option C — auto-discovery**. OpenCode loads every `*.ts` / `*.js`
+file directly under a `plugin/` or `plugins/` directory in a config
+directory. Use a symlink, not a copy: the entry imports `./src/*`, and
+a copy would lose those relative imports.
 
-The entry imports `@opencode-ai/plugin`, so that dependency must be installed at the repository root — `bun install` after clone (declared in `package.json`).
-
-### 7.3 Install as a Lightweight OpenCode Skill (Alternative)
-
-If you do not want to run the TypeScript middleware, copy `skills/reasoning-auditor/skill.md` into your global OpenCode skills directory:
-
-```bash
-mkdir -p ~/.config/opencode/skills/reasoning-auditor
-cp skills/reasoning-auditor/skill.md ~/.config/opencode/skills/reasoning-auditor/skill.md
-```
-
-The skill applies the same audit technique through prompt instructions. The middleware adds what a skill cannot do: automatic critique delivery (steer and interrupt), the tool guard with engineer-directive enforcement, the supervisor memo, the agent-console tools (reminders, recall, report, on-demand audit), and the engineer console (directive files and options).
-
-### 7.4 Agent Console
-
-The plugin registers five tools with OpenCode (`Hooks.tool`), so the
-primary agent can call them like any other tool. This is the agent
-console — self-serve supervision state — in two slices: reminders
-(2.1.0) and recall / report / request_audit (2.3.0).
-
-**`remind_me`** stores a durable fact for the rest of the session:
-
-- Dead ends: "the flaky import always fails — do not retry it; use the
-  direct path instead."
-- Environment quirks: "this project needs bash 4.5 to run the test
-  suite; otherwise there are errors."
-- Decisions: "we chose the streaming parser over the DOM parser."
-- User constraints: "never touch the generated/ directory."
-
-A stored reminder re-enters context two ways: a `Reminders:` section in
-the supervisor memo (re-injected every turn, so reminders survive
-context compaction) and the tool result itself (which echoes the stored
-text, so the reminder lands even when the gateway drops the memo —
-see Section 9).
-
-Each reminder gets a stable id (`r1`, `r2`, ...). Ids are never
-recycled: forgetting `r1` and adding another reminder yields `r3`.
-
-**`forget_reminder`** clears a reminder by id (`forget_reminder r1`).
-An unknown id returns an actionable message listing the current ids.
-
-Behavior details:
-
-- Storage is bounded: the most recent `memoLimits.maxReminders`
-  reminders are kept (default 10;
-  `OPENCODE_SUPERVISOR_MEMO_MAX_REMINDERS`).
-- Whitespace-only text is rejected with an actionable message; text
-  longer than 2000 characters is truncated and the result says so.
-- Supervisor side sessions (audit traffic) get inert results and never
-  read or write reminder state.
-
-**`recall`** reads the full retained state, one section at a time:
-`goal`, `reminders`, `solved`, `critiques`, or `all` (the default).
-Storage is retained deeper than the memo renders (the most recent 50
-solved items and 30 critiques), so recall reaches items the memo's
-recency caps have already dropped — the memo is a bounded view, not
-the record. Recall is read-only.
-
-**`report`** records a self-reported event for the engineer, as one of
-four kinds: `blocker` (stuck, need input), `deviation` (departed from
-the plan or goal), `outcome` (finished something worth surfacing), or
-`note` (anything else). Stored reports appear in an `Agent reports:`
-section of the supervisor memo and are echoed in the tool result.
-Storage is bounded to the most recent `memoLimits.maxReports` reports
-(default 5; `OPENCODE_SUPERVISOR_MEMO_MAX_REPORTS`).
-
-**`request_audit`** asks for an immediate peer audit of a stated claim
-or step. The focus text runs through the same pipeline as reasoning
-steps: narrative stripping, deterministic invariants, and the
-side-session peer audit. A passing focus joins the verified trace
-(the same trust class as a passed reasoning step); a failing audit
-returns the critique in the tool result — it never steers, never
-interrupts, and never consumes the regeneration budget. Bounded per
-session (`maxOnDemandAudits`, default 8;
-`OPENCODE_SUPERVISOR_MAX_ON_DEMAND_AUDITS`); the automatic audit loop
-is unaffected.
-
-Console-tool behavior:
-
-- Text hygiene mirrors the reminder tools: whitespace-only text is
-  rejected with an actionable message; text longer than 2000
-  characters is truncated and the result says so.
-- Supervisor side sessions (audit traffic) get inert results and never
-  read or write console state.
-- Tool bodies fail open: malformed arguments yield actionable
-  results, never thrown errors.
-- Report text is recorded and surfaced only — it never enters
-  peer-audit prompts as criteria. The audit judges reasoning; it does
-  not judge self-reports.
+Start `opencode` in the project; verify an install with `bun test`
+(Node 22+: `npm run test:node`). Prefer no middleware? See
+[Section 8](#8-middleware-or-skill).
 
 ---
 
-### 7.5 Engineer Console: Directives
+## 4. How It Works
+
+### 4.1 The Supervision Loop
+
+```mermaid
+flowchart TD
+    subgraph Loop["Audit loop: every completed reasoning step"]
+        A["Reasoning step completes"] --> B["Strip persuasive narrative"]
+        B --> C{"Deterministic invariants"}
+        C -->|"fail"| F{"Severity"}
+        C -->|"pass"| D["Independent peer audit<br />(side session, own model)"]
+        D -->|"pass"| V[("Verified trace")]
+        D -->|"fail"| F
+        F -->|"minor"| G["Steer: critique as<br />a synthetic user message"]
+        F -->|"severe"| H["Interrupt first,<br />then steer"]
+    end
+    subgraph Guard["Tool guard: every tool call, before execution"]
+        T["Tool call"] --> TG{"Verdict"}
+        TG -->|"reward hack, directive violation,<br />unverified path, or gated"| BL["Block with<br />an actionable reason"]
+        TG -->|"pass"| EX["Execute"]
+    end
+    subgraph Memo["Supervisor memo: every model call"]
+        S["System prompt"] --> SM["Bounded memo appended: goal, directives,<br />reminders, solved items, reports, critiques"]
+    end
+```
+
+1. **Observe.** The `event` hook receives completed reasoning parts
+   (deduplicated by session, message, and part identity); the
+   session's first user message is captured as the goal.
+2. **Strip.** `stripNarrative` removes persuasive conversational text
+   (*"Obviously, this formula is optimal"*) and keeps the formal
+   steps — code, equations, explicit rules — so confidence prose
+   cannot talk the auditor into agreement.
+3. **Audit.** Deterministic invariants run first: arithmetic
+   misstatements, off-by-one loop bounds, and reward-hacking markers
+   fail with no model call. Surviving steps go to an independent
+   auditor model in a dedicated side session — created per audit
+   through the OpenCode client (`auditorModel` / `auditorVariant`),
+   with the session goal and engineer directives in the prompt, so
+   scope drift and directive violations are also findings. Audit
+   traffic never enters the supervised conversation; auditor errors
+   fail open. Passed steps join the **verified trace**.
+4. **Intervene.** A `minor` failure (arithmetic, off-by-one, scope
+   drift) arrives as a `[supervisor]`-prefixed user message the agent
+   incorporates at its next step; a `severe` failure (reward hacking)
+   aborts the session first — the abort precedes the delivery so it
+   clears the flawed turn the critique exists to correct.
+   Interventions are bounded by `maxRegenerations` (default 2) per
+   session; past the bound — and on transport failures — findings
+   are recorded without delivery.
+
+### 4.2 The Tool Guard
+
+Before any tool runs, `tool.execute.before` checks the call:
+reward-hacking patterns, directive violations (forbidden paths and
+command patterns), and file paths absent from the verified trace are
+blocked. A block throws, so the model receives the reason as a tool
+error it can act on. `approve` gates hold matching calls for engineer
+approval; `review` gates hold calls until a passed peer audit
+references the path (Section 6). An empty trace or rule set never
+blocks, and agent-console tools are exempt so `request_audit` stays
+reachable. After each tool completes, a solved item (tool name +
+short outcome) joins a bounded log.
+
+### 4.3 The Supervisor Memo
+
+Before each model call, `experimental.chat.system.transform` appends a
+bounded memo to the system prompt: session goal, active directives,
+reminders, recently solved items, agent reports, and recent critiques.
+Whether the model receives it depends on the gateway honoring pushed
+secondary system messages (Section 9).
+
+### 4.4 Hook Map
+
+The plugin entry (`index.ts`) default-exports a `PluginModule`
+(`{ id, server }`, id `opencode-supervisor`); `server(input, options)`
+returns this hook map (options carry engineer directives through
+tuple registration — Section 6):
+
+| Hook | Purpose |
+| :--- | :--- |
+| `event` | Observes completed reasoning parts (`message.part.updated`), deduplicates them, strips narrative, runs the invariants and the side-session peer audit, records passed steps in the verified trace, and routes failures to critique delivery. |
+| `chat.message` | Captures the first user message of the session as the goal. The goal is never replaced. |
+| `tool.execute.before` | Tool guard: blocks reward-hacking tool calls, engineer-directive violations, and file paths absent from the verified trace (never blocks when the trace is empty); holds approve-gated calls for engineer approval and review-gated calls for a passed peer audit (agent-console tools are exempt so `request_audit` stays reachable); records directive triggers. |
+| `tool.execute.after` | Appends a solved item (tool name + short outcome) to a bounded log. |
+| `tool` | Agent console: registers `remind_me` / `forget_reminder` (durable reminders), `recall` (full retained state), `report` (self-reported events), and `request_audit` (on-demand peer audit) (Section 5). |
+| `experimental.chat.system.transform` | Appends the supervisor memo to the system prompt. Degrades gracefully (memo-less operation) when the hook is absent. |
+| `dispose` | Clears all in-process session state. |
+
+All logic lives in pure `src/` modules that import no OpenCode APIs;
+hooks and session state live only in `index.ts`, in module-level Maps
+keyed by session ID that die with the opencode process. See
+`AGENTS.md` for the module map.
+
+---
+
+## 5. The Agent Console
+
+The plugin registers five tools (`Hooks.tool`) the supervised agent
+can call like any other tool:
+
+- **`remind_me` / `forget_reminder`** — durable session reminders:
+  dead ends ("the flaky import always fails — use the direct path
+  instead"), environment quirks, decisions, user constraints. A
+  stored reminder re-enters context two ways: a `Reminders:` section
+  in the memo (re-injected every turn, surviving context compaction)
+  and the tool result echo (so it lands even when the gateway drops
+  the memo). Stable ids (`r1`, `r2`, ...) are never recycled.
+- **`recall`** — read-only view of the full retained state: `goal`,
+  `reminders`, `solved`, `critiques`, or `all`. Storage retains
+  deeper than the memo renders (50 solved items, 30 critiques), so
+  recall reaches items the memo's recency caps dropped.
+- **`report`** — records a self-reported event for the engineer:
+  `blocker` (stuck, need input), `deviation` (departed from plan or
+  goal), `outcome` (worth surfacing), `note`. Reports appear in an
+  `Agent reports:` memo section and are echoed in the tool result.
+- **`request_audit`** — asks for an immediate peer audit of a stated
+  claim. The focus runs through the same pipeline as reasoning
+  steps: a pass joins the verified trace, a fail returns the
+  critique in the tool result — never steering, interrupting, or
+  consuming the regeneration budget. Bounded per session
+  (`maxOnDemandAudits`, default 8); the automatic audit loop is
+  unaffected.
+
+Console-tool behavior: whitespace-only text is rejected; text over
+2000 characters is truncated (both reported in the result); side
+sessions get inert results; tool bodies fail open — malformed
+arguments yield actionable results, never thrown errors; report text
+never enters audit prompts.
+
+---
+
+## 6. The Engineer Console
 
 Engineers supervise through directive files and plugin options. A
 directive is advisory text plus optional machine rules:
@@ -335,32 +242,28 @@ directive is advisory text plus optional machine rules:
 - **Advisory text** (the markdown body) rides the supervisor memo and
   becomes an audit criterion — the peer auditor flags steps that
   violate it. Unconditioned directives ride the memo every turn; a
-  directive with `when` rules surfaces only after a tool call matches.
-- **`enforce` rules** block tool calls before execution:
-  `forbidPath` (glob: `*`, `**`, `?`) and `forbidPattern` (regex,
-  case-insensitive). The block reason names the directive, the match,
-  and the advisory text, so the model can correct course. An empty
-  rule set never blocks.
-- **`when` rules** surface a directive just-in-time: `tool` (tool
-  name, case-insensitive) or `path` (argument-path glob). Blocked
-  calls still record the trigger.
-- **`approve` rules** hold matching tool calls for engineer
-  approval: `id` (optional explicit gate key, else
-  `<directive>/<rule index>`), and any of `tool`, `path` (glob),
-  and `pattern` (regex, case-insensitive) — all present criteria
-  must match, following `enforce` semantics (FR-028). The block
-  reason names the directive, the gate key, and the exact
-  approval instruction.
+  directive with `when` rules surfaces only after a tool call
+  matches.
+- **`enforce` rules** block tool calls before execution: `forbidPath`
+  (glob: `*`, `**`, `?`) and `forbidPattern` (regex,
+  case-insensitive). The block reason names the directive, the
+  match, and the advisory text. An empty rule set never blocks.
+- **`when` rules** surface a directive just-in-time: `tool` (name,
+  case-insensitive) or `path` (argument-path glob). Blocked calls
+  still record the trigger.
+- **`approve` rules** hold matching tool calls for engineer approval:
+  `id` (optional explicit gate key, else `<directive>/<rule
+  index>`) and any of `tool`, `path` (glob), `pattern` (regex) — all
+  present criteria must match, following `enforce` semantics.
 - **`review` rules** hold matching tool calls until the verified
-  trace references the touched path: `path` (glob). The peer
-  auditor is the required reviewer — a passed audit that
-  references the path is the sign-off, and the `request_audit`
-  tool can produce one immediately. Review gates deliberately
-  block on an empty trace.
+  trace references the touched path (`path`, glob). The peer auditor
+  is the reviewer — a passed audit referencing the path is the
+  sign-off, and `request_audit` can produce one immediately. Review
+  gates block on an empty trace.
 
-Directive files live in `.opencode/supervisor/directives/*.md` —
-the markdown body is the advisory text, and a fenced `supervisor`
-code block carries the rules as JSON:
+Directive files live in `.opencode/supervisor/directives/*.md`; the
+markdown body is the advisory text, and a fenced `supervisor` code
+block carries the rules as JSON:
 
 ````markdown
 Never read, print, or copy secret material. Secrets live in the
@@ -375,8 +278,8 @@ engineer instead.
 ```
 ````
 
-Directives can also be registered through tuple plugin registration
-(`opencode.json`):
+Directives can also ride plugin options through tuple registration in
+`opencode.json`:
 
 ```json
 {
@@ -389,83 +292,175 @@ Directives can also be registered through tuple plugin registration
 ```
 
 File directives load first (sorted by filename), then option
-directives append. Bounds are fixed, not configurable: at most 20
-directives (extras dropped with a warning), 1000 characters of
-advisory text per directive, 10 rules of each kind per directive,
-and a 4000-character aggregate render budget for the memo section.
-Malformed files and invalid rules are skipped with a warning —
-loading fails open, and no directives configured means 2.1.0
-behavior. Directives load once at plugin start; there is no hot
-reload.
+directives append. Bounds are fixed: 20 directives, 1000 characters
+of advisory text per directive, 10 rules of each kind per directive,
+and a 4000-character aggregate render budget. Malformed files and
+invalid rules are skipped with a warning — loading fails open.
+Directives load once at plugin start; there is no hot reload.
 
-Approvals live in `.opencode/supervisor/approvals.json` — a JSON
-array of `{ "gate": "<key>", "note": "...", "expires":
-"YYYY-MM-DD" }` records (at most 50, most recent kept). The file
-is read fresh at each gated call: adding an entry approves the
-gate on the next matching call (each granted gate logs once per
-session), removing an entry revokes it, and an `expires` date in
-the past stops the entry from matching (the expiry day itself
-still counts; expiry is evaluated at UTC end of day). Gate
-path globs follow the other directive globs: root-anchored
-and case-insensitive, with `**/`-prefixed globs covering
-deeper or differently anchored spellings. Verification fails
-**closed**: an unreadable or
-malformed approvals file blocks the gated call carrying the
-error, while an absent file simply means "not approved" and
-blocks with the approval instruction. Tool calls from the
-supervised agent that touch the approvals file are blocked by
-default — the agent cannot self-approve a gate. The plugin's own
-agent-console tools are exempt from both gate kinds — gates guard
-the agent's effectors, not the supervision channel the block
-reasons point the agent at (`request_audit`).
+**Approvals.** `approve` gates read
+`.opencode/supervisor/approvals.json` fresh at each gated call — a
+JSON array of `{ "gate": "<key>", "note": "...", "expires":
+"YYYY-MM-DD" }` records (at most 50, most recent kept). Adding an
+entry approves the gate on the next matching call; removing one
+revokes it; `expires` is evaluated at UTC end of day (the expiry day
+itself still counts). Verification fails closed — an unreadable or
+malformed approvals file blocks the gated call carrying the error,
+while an absent file simply means "not approved". Agent calls
+touching any path whose basename is `approvals.json` are blocked by
+default — the agent cannot self-approve a gate — and agent-console
+tools are exempt from both gate kinds.
 
 ---
 
-## 8. Tested Versions
+## 7. Configuration
 
-- OpenCode runtime: **1.19.0**
-- `@opencode-ai/plugin`: **^1.19.4** (declared in `package.json`)
+Settings resolve in order of precedence at runtime:
 
-The memo uses the `experimental.chat.system.transform` hook. Experimental hooks are a moving target across OpenCode upgrades; if the hook is absent, the plugin loads and runs without the memo rather than failing.
+1. **Environment variables** — the `OPENCODE_SUPERVISOR_*` names in
+   the table below.
+2. **Defaults** — the `pluginConfig` object at the top of `index.ts`.
+
+> A session-plugin-config tier exists in the resolver, but no runtime
+> hook payload carries one (verified against `@opencode-ai/plugin`
+> 1.19.4) — configure through the environment.
+
+| Knob | Environment variable | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `auditorModel` | `OPENCODE_SUPERVISOR_MODEL` | `google/gemini-3.8-flash` | The provider and model slug for the auditor side session. Format: `<provider>/<model-id>` (for example, `openai/o3-mini`, `anthropic/claude-3-7-sonnet`, or `google/gemini-3.8-flash`). |
+| `auditorVariant` | `OPENCODE_SUPERVISOR_VARIANT` | `low` | The reasoning effort passed to the auditor model. Allowed values: `minimal`, `low`, `medium`, `high`, `default`. |
+| `maxRegenerations` | `OPENCODE_SUPERVISOR_MAX_REGENERATIONS` | `2` | The maximum number of interventions per session — delivered critiques and severe interrupts share this bound. Past the bound, critiques (severe included) are recorded without delivery or interrupt. |
+| `stripMode` | `OPENCODE_SUPERVISOR_STRIP_MODE` | `code_and_math` | Controls how `stripNarrative()` filters the Chain-of-Thought before the audit. See Section 7.1 below. |
+| `blockRewardHacking` | `OPENCODE_SUPERVISOR_BLOCK_REWARD_HACKING` | `true` | When `true`, the tool guard blocks tool calls that contain `--no-verify`, `.skip(`, `expect(true).toBe(true)`, or test deletion commands. |
+| `requireStepReferenceInTools` | `OPENCODE_SUPERVISOR_REQUIRE_STEP_REFERENCE_IN_TOOLS` | `true` | When `true`, the tool guard blocks tool calls whose file-path arguments do not appear in the verified reasoning trace. Never blocks when the trace is empty. |
+| `memoLimits.maxSolvedItems` | `OPENCODE_SUPERVISOR_MEMO_MAX_SOLVED_ITEMS` | `5` | Cap on solved items shown in the memo. Storage retains more (50) for `recall`; this knob bounds the rendered view. |
+| `memoLimits.maxCritiques` | `OPENCODE_SUPERVISOR_MEMO_MAX_CRITIQUES` | `3` | Cap on critiques shown in the memo. Storage retains more (30) for `recall`; this knob bounds the rendered view. |
+| `memoLimits.maxReminders` | `OPENCODE_SUPERVISOR_MEMO_MAX_REMINDERS` | `10` | Cap on reminders kept in state and shown in the memo (the most recent are kept). |
+| `memoLimits.maxReports` | `OPENCODE_SUPERVISOR_MEMO_MAX_REPORTS` | `5` | Cap on agent reports kept in state and shown in the memo (the most recent are kept). |
+| `maxOnDemandAudits` | `OPENCODE_SUPERVISOR_MAX_ON_DEMAND_AUDITS` | `8` | Per-session cap on audits requested through the `request_audit` tool. The automatic audit loop is unaffected. |
+
+Gate approvals are not a knob: `approve` rules read the approvals file
+fresh at each gated call, so approving or revoking takes effect on
+the next tool call with no restart (Section 6).
+
+Environment variable values: booleans accept exactly `true` or
+`false`; numbers must be non-negative; `stripMode` must be one of the
+three mode names. Invalid values fall through to the next precedence
+tier.
+
+### 7.1 Understanding `stripMode`
+
+- **`code_and_math` (default)** — retains steps containing code
+  blocks, math operators, SQL keywords, or variable assignments;
+  removes pure prose. For general coding and math tasks.
+- **`balanced`** — everything in `code_and_math`, plus prose stating
+  formal specifications, complexity, preconditions, invariants, or
+  file paths. For architecture and security reviews.
+- **`strict`** — only fenced code blocks and explicit equations.
+  Zero natural language.
 
 ---
 
-## 9. Current Limitations
+## 8. Middleware or Skill?
 
-- The critique is delivered as a user-role message (synthetic-marked). The V1 OpenCode client exposes no delivery option; steer pickup is run-loop behavior verified against 1.19.0.
-- Severe interrupts are bounded by `maxRegenerations` (default 2) per session: once the bound is spent, a severe finding neither interrupts nor delivers — it is recorded as withheld. The tool guard's reward-hacking block remains active independent of the bound.
-- The supervisor memo is appended to the system prompt by the plugin, but tested model gateways (enmaas, OpenRouter) drop pushed secondary system messages — memo content may never reach the model depending on the gateway (evidence: the smoke test recorded in `openspec/changes/audit-supervisor/design.md`). Reminders carry a second channel: the `remind_me` tool result echoes the stored text into the conversation, so the reminder is seen even when the memo is not.
-- Supervision state is in-process only. Restarting OpenCode clears the goal, the verified trace, and the logs.
-- The verified-trace file-path check is best-effort: a tool call that races an in-flight audit sees the partial trace (an empty trace never blocks).
-- A blocked tool surfaces to the model as an error tool result, so the model may retry the call (bounded by OpenCode's doom-loop check).
-- Directive `forbidPath`, `when`-path, `approve`-path, and `review`-path globs are root-anchored and case-insensitive, and match paths the guard extracts from tool arguments — a broader best-effort extractor than the verified-trace check (it sees dotfiles and extensionless paths), but `**/`-prefixed globs are required to cover deeper or differently anchored spellings. Directives load once at plugin start; there is no hot reload.
-- Agent reports are self-reported and unaudited: the supervisor surfaces them for the engineer but does not verify them, and report text never enters peer-audit prompts. On-demand audits are bounded per session and never interrupt. Recall is read-only.
-- The approvals file is engineer-authored state. Tool calls from the supervised agent that touch it (any path whose basename is `approvals.json`) are blocked by default, so the agent cannot self-approve a gate through its own tools. The file remains writable by anything outside opencode — the same project-directory trust class as directive files — so grant logs identify the directive, gate key, and tool for later audit. Pair an `enforce` `forbidPath` rule over `.opencode/supervisor/**` for defense-in-depth. Review gates block the first matching calls of a session until a passing audit references the path.
+The audit technique also ships as a standalone, prompt-based skill —
+no middleware required:
 
----
+```bash
+mkdir -p ~/.config/opencode/skills/reasoning-auditor
+cp skills/reasoning-auditor/skill.md ~/.config/opencode/skills/reasoning-auditor/
+```
 
-## 10. Roadmap: Two Consoles on the Supervision Plane
-
-The audit loop above is the automated pillar; both consoles now ship — the agent console (first slice 2.1.0, second slice 2.3.0) and the engineer console (2.2.0). Both write the same session-state layer rendered through the memo:
-
-1. **Agent console (self-serve tools)**: shipped — `remind_me` / `forget_reminder` for durable, compaction-proof reminders ("this project needs bash 4.5 for the test suite"), plus `recall` (full retained state beyond the memo caps), `report` (blockers, deviations, outcomes, notes), and `request_audit` (on-demand peer audit of a stated claim) (Section 7.4).
-2. **Engineer console (directives)**: shipped — directive files and tuple-registered options (`.opencode/supervisor/directives/*.md`, `options.directives`) with advisory memo surfacing, `when` triggers, `enforce` rules wired into the tool guard, audit criteria, and `approve` / `review` gate rules — approval gates with a fresh-read approvals file and review gates satisfied by a passed peer audit (Section 7.5).
+| Capability | Middleware | Skill |
+| :--- | :--- | :--- |
+| Audit | Independent peer model in a side session, plus deterministic invariants | Same technique, self-applied through prompt instructions |
+| Critique delivery | Steers or interrupts the session automatically | The model must follow the skill's instructions |
+| Tool guard, memo, agent console, engineer console | Yes | No |
+| Setup | Plugin registration | Copy one file |
 
 ---
 
-## 11. Future Directions: Extending the Supervision Loop
+## 9. Limitations and Compatibility
 
-Beyond the roadmap consoles, the supervision loop (observe → strip → audit → steer or interrupt) can supervise an agent for more than math and logic mistakes:
+- Tested against OpenCode **1.19.0** and `@opencode-ai/plugin`
+  **^1.19.4**. The memo uses the experimental
+  `experimental.chat.system.transform` hook and degrades gracefully
+  (memo-less operation) when the hook is absent.
+- Tested model gateways (enmaas, OpenRouter) drop pushed secondary
+  system messages, so memo content may never reach the model depending
+  on the gateway (evidence: `openspec/changes/audit-supervisor/design.md`).
+  Reminders carry a second channel: the `remind_me` result echoes the
+  stored text into the conversation.
+- The critique is delivered as a synthetic-marked user message; the V1
+  OpenCode client exposes no other option (verified against 1.19.0).
+- Interventions are bounded by `maxRegenerations` (default 2) per
+  session; past the bound, severe findings are recorded without
+  delivery. The reward-hacking block stays active independent of the
+  bound.
+- Supervision state is in-process only; restarting OpenCode clears the
+  goal, the verified trace, and the logs.
+- The verified-trace path check is best-effort: a tool call racing an
+  in-flight audit sees the partial trace (an empty trace never
+  blocks). Directive globs are root-anchored and case-insensitive;
+  `**/`-prefixed globs cover deeper spellings.
+- A blocked tool surfaces as an error tool result, so the model may
+  retry the call (bounded by OpenCode's doom-loop check). Agent
+  reports are self-reported and unaudited; recall is read-only.
+- The approvals file is engineer-authored state in the
+  project-directory trust class — pair an `enforce` `forbidPath` rule
+  over `.opencode/supervisor/**` for defense-in-depth. Review gates
+  block the first matching calls of a session until a passing audit
+  references the path.
 
-1. **Persist Lessons Learned**:
-   - *Problem*: While debugging, the watched AI discovers useful facts about the codebase (for example, a tricky build command or a non-obvious API rule), but that knowledge disappears when the session ends. The memo carries solved items and critiques only within a session.
-   - *Solution*: When the auditor observes a verified root-cause discovery in the reasoning trace, write that lesson to a persistent store (such as a knowledge base) without interrupting the AI, and recall it in later sessions.
-2. **Tighter Scope Enforcement**:
-   - *Problem*: An AI agent asked to fix a small bug begins refactoring unrelated modules. The audit prompt already receives the session goal and flags scope drift as a minor finding, but drift only steers.
-   - *Solution*: Interrupt directly when the agent plans work far outside the stated goal.
-3. **Just-in-Time Context Injection**:
-   - *Problem*: Putting every team rule in the initial system prompt wastes tokens and dilutes attention.
-   - *Solution*: When the verified trace mentions a database migration or another rule-heavy area, inject the matching team checklist into the memo at that exact moment.
-4. **Streaming Observation**:
-   - *Problem*: Auditing reasoning only after a part completes leaves a window where a flawed step drives tool calls before the audit lands (the tool guard's trace check is best-effort for the same reason).
-   - *Solution*: Observe and interrupt mid-stream through the newer model-wrapping APIs. The pure `src/` boundary keeps that port cheap.
+---
+
+## 10. Appendix
+
+### 10.1 Background
+
+The audit loop applies a published multi-agent reasoning-audit-and-
+repair technique. Research shows that when one AI model reviews
+another's full Chain-of-Thought, the reviewer often agrees with wrong
+answers, because the primary model writes confident narrative around
+its mistakes. The framework counters this by (1) separating logic from
+narrative — stripping rhetorical text so the auditor sees only raw
+logic, math, and code — and (2) repairing from the exact broken step,
+naming the step number and the formal error. Source: [A new framework
+teaches AI models to audit and repair each other's reasoning,
+improving accuracy
+(VentureBeat)](https://venturebeat.com/orchestration/a-new-framework-teaches-ai-models-to-audit-and-repair-each-others-reasoning-improving-accuracy).
+
+### 10.2 Migrating from 1.x
+
+Formerly `opencode-reasoning-audit` (1.x). Version 2.0.0 renames the
+plugin and its configuration surface; the break is clean — 1.x names
+are not read as aliases.
+
+| 1.x variable | 2.0.0 variable |
+| :--- | :--- |
+| `OPENCODE_AUDITOR_MODEL` | `OPENCODE_SUPERVISOR_MODEL` |
+| `OPENCODE_AUDITOR_VARIANT` | `OPENCODE_SUPERVISOR_VARIANT` |
+| `OPENCODE_AUDITOR_MAX_REGENERATIONS` | `OPENCODE_SUPERVISOR_MAX_REGENERATIONS` |
+| `OPENCODE_AUDITOR_STRIP_MODE` | `OPENCODE_SUPERVISOR_STRIP_MODE` |
+| `OPENCODE_AUDITOR_BLOCK_REWARD_HACKING` | `OPENCODE_SUPERVISOR_BLOCK_REWARD_HACKING` |
+| `OPENCODE_AUDITOR_REQUIRE_STEP_REFERENCE_IN_TOOLS` | `OPENCODE_SUPERVISOR_REQUIRE_STEP_REFERENCE_IN_TOOLS` |
+| `OPENCODE_AUDITOR_MEMO_MAX_SOLVED_ITEMS` | `OPENCODE_SUPERVISOR_MEMO_MAX_SOLVED_ITEMS` |
+| `OPENCODE_AUDITOR_MEMO_MAX_CRITIQUES` | `OPENCODE_SUPERVISOR_MEMO_MAX_CRITIQUES` |
+| `OPENCODE_AUDITOR_ENDPOINT` | *(removed in 1.0 — no equivalent; audits run through the side session)* |
+
+Also renamed: the plugin id and session config key
+(`opencode-reasoning-audit` → `opencode-supervisor`) and the GitHub
+repository (old URLs redirect automatically).
+
+### 10.3 Future Directions
+
+- **Persist lessons learned** — write verified root-cause discoveries
+  to a persistent store, recalled in later sessions.
+- **Tighter scope enforcement** — interrupt directly on work far
+  outside the stated goal, rather than only steering.
+- **Just-in-time context injection** — surface the matching team
+  checklist when the verified trace touches a rule-heavy area.
+- **Streaming observation** — audit mid-stream, before a flawed step
+  drives tool calls (the pure `src/` boundary keeps that port cheap).
+
+The change pipeline lives in [`openspec/`](openspec/).
