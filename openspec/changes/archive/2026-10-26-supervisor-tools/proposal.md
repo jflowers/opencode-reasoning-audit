@@ -62,10 +62,12 @@ remind_me / forget_reminder established.
 
 ### Modified Capabilities
 
-None — `openspec/specs/` declares no main specs on this branch;
-the memo and reminder requirements this change builds on live in
-their originating changes (audit-supervisor, agent-reminders), and
-their observable behavior is unchanged.
+- `supervisor-memo`: the memo gains a bounded "Agent reports" section
+  (FR-036); `MemoLimits` gains the required `maxReports` field; and
+  solved-items and critique-log storage is bounded by new retention
+  constants (50 solved / 30 critiques, design D3) that run deeper than
+  the memo's render caps so recall reaches further. Rendered memo
+  output for sessions without reports is unchanged.
 
 ## Impact
 
@@ -78,10 +80,16 @@ their observable behavior is unchanged.
   (session plugin config, environment variables, defaults).
 - **Tests**: new `test/console.test.ts` mirroring the module
   (storage, rendering, bounds) plus hook-layer tests for the three
-  tools; existing suites unchanged.
+  tools; existing suites updated — memoLimits literals gain
+  `maxReports`, and two FR-017-era storage-bound tests are rewritten
+  for the design D3 retention semantics (storage deeper than render).
 - **Docs**: README (Sections 5.1, 5.4, 7.4, 10), AGENTS.md
   (overview roadmap, structure, architecture, test commands),
   CHANGELOG 2.3.0; blog and tutorial follow-up issues per the
   documentation gate.
-- **Compatibility**: no breaking changes — existing tools, memo
-  sections, and config keys are untouched; the new caps default on.
+- **Compatibility**: no runtime breaking changes — existing tools
+  and memo sections render as before, and the new caps default on.
+  TypeScript consumers constructing `MemoLimits` literals gain a
+  required `maxReports` field (compile-time only), and stored-state
+  depth for solved items and critiques deepens from the render caps
+  to the retention constants.
