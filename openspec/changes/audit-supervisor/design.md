@@ -48,7 +48,7 @@ out of scope for this change.
 | Goal capture | `chat.message` | First user message per session (FR-013). |
 | Tool guard | `tool.execute.before` | Sync regex checks run before every tool (FR-009..FR-012). |
 | Solved items | `tool.execute.after` | Append bounded log entries (FR-014). |
-| Memo injection | `experimental.chat.system.transform` | Append memo section (FR-016). |
+| Memo injection | `experimental.chat.messages.transform` | Append memo message (FR-016). |
 | Critique delivery | `input.client.session.promptAsync` | Steer prompt at next turn (FR-007); `session.abort` on severe (FR-008). Originally recorded as `session.prompt` with `session.interrupt` on severe — superseded by spike 1.2: `session.promptAsync` + `session.abort`. |
 
 Alternative considered: dev V2 `session.hook("context")` +
@@ -692,7 +692,7 @@ block, and the model reported the reason verbatim in its reply
 (FR-012 behavior). `bun test` in the repo stayed green
 throughout (70/70).
 
-### FR-016 supervisor memo — hook observed, delivery blocked upstream
+### FR-016 supervisor memo — delivered via messages.transform
 
 The transform hook fired on every LLM request (title and main
 turns) and the memo was appended to `output.system`. Side-session
@@ -702,8 +702,8 @@ non-null by construction with the goal recorded.
 
 However, the models did not receive the pushed content — and
 neither did they receive the global hashline plugin's push, which
-occupies the same system slot (independent control). Root cause
-was isolated past the plugin and past OpenCode:
+occupies the same system slot (independent control). The original
+investigation verified each pipeline layer in isolation:
 
 - OpenCode v1.19.0 `prepare()` maps every system element to a
   system message; `ProviderTransform.message` preserves them
@@ -719,14 +719,69 @@ was isolated past the plugin and past OpenCode:
   the hook (begin every reply with PINEAPPLE-7741 — neither
   complied) and deny seeing hashline or memo text.
 
-The drop is therefore in the gateway/transport layer, downstream
-of a correctly-formed request — an environment property of both
-available providers, not a plugin defect. The FR-016 hook
-contract (append memo to `output.system`) is satisfied; memo
-delivery to the model depends on the transport honoring
-secondary system messages, which these gateways currently do
-not. When the transport does (direct Anthropic/OpenAI
-credentials, or a gateway fix), the memo rides through unchanged.
+[Amendment 2026-10-27 — root cause corrected. Isolated-layer
+verification missed the composed pipeline; re-investigation
+with a capture proxy and in-process fetch logging falsified
+the gateway conclusion:]
+
+- Raw curl against the enmaas gateway delivers multi-element
+  system prompts in every shape tested (two-element push
+  analog, element-0 tail, streaming, tools, conversation
+  history, 6.5 KB element 0, and combinations). The gateway
+  is exonerated.
+- A standalone repro using the binary's exact versions
+  (ai@6.0.168, @ai-sdk/openai-compatible@2.0.41) and
+  OpenCode's streamText call shape (tools, activeTools,
+  providerOptions, wrapped middleware) puts both system
+  messages on the wire. The AI SDK chain is exonerated when
+  composed, not just in isolation.
+- In-process fetch logging inside OpenCode 1.19.0 shows the
+  HTTP body carrying ONLY the original pre-hook system
+  element — exact original length, no second element — after
+  an instrumented handler BOTH mutated element 0 in place AND
+  pushed a new element. Both mutations were visible in the
+  array the handler received; neither reached the request.
+  The hashline push (present at hook fire) is equally absent
+  from the wire.
+
+The drop is inside OpenCode 1.19.0: the plugin hook dispatch
+hands plugins a disposable copy of the system array and builds
+the request from the pre-hook original, so no plugin's
+`experimental.chat.system.transform` mutations reach the
+request in this build (the installed binary embeds an
+effect-based plugin architecture whose dispatch differs from
+the by-reference `Plugin.trigger` in the published v1.19.0
+source). The FR-016 hook contract (append memo to
+`output.system`) was satisfied but moot; the element-0 merge
+variant (append into system[0] instead of pushing a second
+element) was tested directly and is equally discarded — merging
+would not restore delivery.
+
+[Resolution 2026-10-27 — delivery moved to
+`experimental.chat.messages.transform`, wire-verified on the
+same OpenCode 1.19.0 build:]
+
+- An instrumented plugin handler for
+  `experimental.chat.messages.transform` appended a user message
+  (`info` + `parts:[{type:'text'}]`) carrying a needle to the
+  payload list; in-process fetch logging showed the message on
+  the HTTP wire on the very next turn. In-place mutation of an
+  existing user message's text part propagates identically. So
+  this hook's payload mutations DO reach the request — only the
+  system transform's are discarded.
+- `experimental.session.compacting` was also verified (via the
+  v1 `POST /session/{id}/summarize` route): context entries land
+  verbatim in the compaction summarization prompt. Viable, but
+  compaction-only; unsuitable for per-turn memo delivery.
+- FR-016 now appends the memo as one trailing user message
+  (framed `[supervisor] session memo — supervisor context, not
+  user input:`) on every user prompt. The message is
+  transform-time only (never persisted to the session; re-built
+  fresh each turn), rides into compaction history, and shares
+  the user-message channel `promptAsync` steering already uses.
+  The system-transform registration was removed rather than
+  kept alongside: if a future OpenCode build restores
+  propagation, dual registration would deliver the memo twice.
 
 ### Caveats
 

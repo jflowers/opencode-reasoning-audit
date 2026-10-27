@@ -85,9 +85,28 @@ function dispatchToolBefore(hooks: Hooks, sessionID: string, tool: string, args:
   return hooks['tool.execute.before']!({ tool, sessionID, callID: 'call-1' }, { args });
 }
 
-/** Dispatches one system-transform invocation through the hook. */
-function dispatchSystemTransform(hooks: Hooks, input: unknown, output: unknown): Promise<void> {
-  return hooks['experimental.chat.system.transform']!(input, output);
+/** A session message in the messages-transform payload shape. */
+function sessionMessage(sessionID: string): Record<string, unknown> {
+  return {
+    info: { id: 'msg-1', sessionID, role: 'user', time: { created: 1 } },
+    parts: [{ type: 'text', text: 'user turn' }],
+  };
+}
+
+/** Dispatches one memo messages-transform invocation; returns the payload. */
+async function dispatchMemoTransform(hooks: Hooks, sessionID: string): Promise<unknown[]> {
+  const messages: unknown[] = [sessionMessage(sessionID)];
+  const dispatch = hooks['experimental.chat.messages.transform'] as
+    | ((input: unknown, output: unknown) => Promise<void>)
+    | undefined;
+  await dispatch?.(undefined, { messages });
+  return messages;
+}
+
+/** Extracts a messages-transform message's text (joined text parts). */
+function messageText(message: unknown): string {
+  const parts = (message as { parts?: Array<{ type?: string; text?: unknown }> }).parts ?? [];
+  return parts.filter((part) => part.type === 'text').map((part) => String(part.text)).join('\n');
 }
 
 /** Every OPENCODE_SUPERVISOR_* knob, for env-cleaning around hook-layer tests. */
@@ -634,11 +653,11 @@ test('directive files load from the project directory into the memo', async () =
     await withCleanDirectivesEnv(async () => {
       const hooks = await plugin.server(mockPluginInput(dir));
       sessionState.get('directives-load');
-      const output = { system: [] as string[] };
-      await dispatchSystemTransform(hooks, { sessionID: 'directives-load', model: {} }, output);
-      assert.equal(output.system.length, 1);
-      assert.ok(output.system[0].includes('Directives:'));
-      assert.ok(output.system[0].includes(`- no-secrets: ${NO_SECRETS_TEXT}`));
+      const messages = await dispatchMemoTransform(hooks, 'directives-load');
+      const memo = messageText(messages[1]);
+      assert.equal(messages.length, 2);
+      assert.ok(memo.includes('Directives:'));
+      assert.ok(memo.includes(`- no-secrets: ${NO_SECRETS_TEXT}`));
       await hooks.dispose!();
     });
   } finally {
@@ -715,16 +734,14 @@ test('a trigger rule surfaces its directive in the memo after a matching call', 
       const hooks = await plugin.server(mockPluginInput(dir));
       sessionState.get('trigger-session');
 
-      const before = { system: [] as string[] };
-      await dispatchSystemTransform(hooks, { sessionID: 'trigger-session', model: {} }, before);
-      assert.equal(before.system.length, 0);
+      const before = await dispatchMemoTransform(hooks, 'trigger-session');
+      assert.equal(before.length, 1);
 
       await dispatchToolBefore(hooks, 'trigger-session', 'edit', { path: 'src/legacy/queue.ts' });
 
-      const after = { system: [] as string[] };
-      await dispatchSystemTransform(hooks, { sessionID: 'trigger-session', model: {} }, after);
-      assert.equal(after.system.length, 1);
-      assert.ok(after.system[0].includes('- legacy-note: Explain migration constraints first.'));
+      const after = await dispatchMemoTransform(hooks, 'trigger-session');
+      assert.equal(after.length, 2);
+      assert.ok(messageText(after[1]).includes('- legacy-note: Explain migration constraints first.'));
       await hooks.dispose!();
     });
   } finally {
@@ -747,10 +764,9 @@ test('a blocked call still records its trigger', async () => {
         dispatchToolBefore(hooks, 'blocked-trigger-session', 'bash', { command: 'cat secrets/credentials.json' })
       );
       assert.ok(sessionState.get('blocked-trigger-session').triggeredDirectives.includes('secrets-note'));
-      const output = { system: [] as string[] };
-      await dispatchSystemTransform(hooks, { sessionID: 'blocked-trigger-session', model: {} }, output);
-      assert.equal(output.system.length, 1);
-      assert.ok(output.system[0].includes('- secrets-note: Ask the engineer for vault access.'));
+      const messages = await dispatchMemoTransform(hooks, 'blocked-trigger-session');
+      assert.equal(messages.length, 2);
+      assert.ok(messageText(messages[1]).includes('- secrets-note: Ask the engineer for vault access.'));
       await hooks.dispose!();
     });
   } finally {
@@ -763,10 +779,9 @@ test('a project without directives keeps the 2.1.0 behavior', async () => {
     const hooks = await plugin.server(mockPluginInput('/tmp/supervisor-test'));
     sessionState.get('baseline-session');
     sessionState.get('baseline-session').goal = 'a goal';
-    const output = { system: [] as string[] };
-    await dispatchSystemTransform(hooks, { sessionID: 'baseline-session', model: {} }, output);
-    assert.equal(output.system.length, 1);
-    assert.ok(!output.system[0].includes('Directives:'));
+    const messages = await dispatchMemoTransform(hooks, 'baseline-session');
+    assert.equal(messages.length, 2);
+    assert.ok(!messageText(messages[1]).includes('Directives:'));
     await dispatchToolBefore(hooks, 'baseline-session', 'bash', { command: 'bun test' });
     await hooks.dispose!();
   });
@@ -779,10 +794,9 @@ test('options.directives registers directives through the tuple channel', async 
     });
     sessionState.get('options-session');
     await dispatchToolBefore(hooks, 'options-session', 'bash', { command: 'bun test' });
-    const output = { system: [] as string[] };
-    await dispatchSystemTransform(hooks, { sessionID: 'options-session', model: {} }, output);
-    assert.equal(output.system.length, 1);
-    assert.ok(output.system[0].includes('- opt-directive: Prefer bun over node.'));
+    const messages = await dispatchMemoTransform(hooks, 'options-session');
+    assert.equal(messages.length, 2);
+    assert.ok(messageText(messages[1]).includes('- opt-directive: Prefer bun over node.'));
     await hooks.dispose!();
   });
 });
@@ -801,11 +815,11 @@ test('the directive count bound drops the overflow with a warning', async () => 
       try {
         const hooks = await plugin.server(mockPluginInput(dir));
         sessionState.get('cap-session');
-        const output = { system: [] as string[] };
-        await dispatchSystemTransform(hooks, { sessionID: 'cap-session', model: {} }, output);
-        assert.equal(output.system.length, 1);
-        assert.ok(output.system[0].includes('- d20: policy 20'));
-        assert.ok(!output.system[0].includes('d21'));
+        const messages = await dispatchMemoTransform(hooks, 'cap-session');
+        assert.equal(messages.length, 2);
+        const memo = messageText(messages[1]);
+        assert.ok(memo.includes('- d20: policy 20'));
+        assert.ok(!memo.includes('d21'));
         await hooks.dispose!();
       } finally {
         console.warn = originalWarn;
@@ -918,10 +932,9 @@ test('an unreadable directive file is skipped while the rest still load', async 
       try {
         const hooks = await plugin.server(mockPluginInput(dir));
         sessionState.get('unreadable-session');
-        const output = { system: [] as string[] };
-        await dispatchSystemTransform(hooks, { sessionID: 'unreadable-session', model: {} }, output);
-        assert.equal(output.system.length, 1);
-        assert.ok(output.system[0].includes('- good:'));
+        const messages = await dispatchMemoTransform(hooks, 'unreadable-session');
+        assert.equal(messages.length, 2);
+        assert.ok(messageText(messages[1]).includes('- good:'));
         await hooks.dispose!();
       } finally {
         console.warn = originalWarn;

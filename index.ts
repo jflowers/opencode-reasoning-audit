@@ -9,7 +9,10 @@
  * the agent console's second slice — recall, report, and
  * on-demand audit tools (`tool`, FR-033..FR-041),
  * load and enforce engineer directives (FR-026..FR-032), and inject
- * the supervision memo (`experimental.chat.system.transform`). All
+ * the supervision memo (`experimental.chat.messages.transform`; FR-016
+ * moved off `experimental.chat.system.transform` — OpenCode 1.19.0
+ * discards system-transform payload mutations, so the memo rides a
+ * transform-time user message instead). All
  * audit logic lives in the pure `src/` modules; this file owns the
  * per-session state (design D4), config resolution (session plugin
  * config → environment → `pluginConfig` defaults), the D2
@@ -334,7 +337,7 @@ export const sessionState = {
  * model's own reasoning parts re-enter the `event` hook (recursively
  * spawning further side sessions with a reasoning-emitting auditor),
  * `chat.message` can capture the audit prompt as a side-session
- * goal, and the system transform can inject the supervision memo
+ * goal, and the memo transform can inject the supervision memo
  * into the audit calls. Every hook short-circuits when the incoming
  * session ID is in this set: the pipeline supervises the target
  * conversation, not the plugin's own machinery (FR-001/D2 intent).
@@ -343,6 +346,13 @@ export const sessionState = {
  * cleaned up, so the set tracks exactly the live side sessions.
  */
 const auditorSessionIds = new Set<string>();
+
+/**
+ * Monotonic sequence for memo message ids (FR-016): the messages-
+ * transform handler appends a fresh memo message per turn; the ids
+ * only need to be unique within a dispatch payload, never persisted.
+ */
+let memoMessageSeq = 0;
 
 /**
  * Whether `sessionId` names one of the plugin's own live auditor
@@ -794,23 +804,30 @@ function createCritiqueDelivery(client: PluginInput['client']): (request: Critiq
 
 // ── Experimental hook registration (D-risk "wrap registration, degrade") ──
 
-/** Hook name for the experimental system-prompt transform (design D1 memo injection). */
-const SYSTEM_TRANSFORM_HOOK = 'experimental.chat.system.transform';
+/**
+ * Hook name for the experimental message-list transform (FR-016 memo
+ * injection). Wire-verified against OpenCode 1.19.0: payload mutations
+ * to `output.messages` reach the model request, while
+ * `experimental.chat.system.transform` mutations are discarded by that
+ * build (see openspec/changes/audit-supervisor/design.md FR-016).
+ */
+const MESSAGES_TRANSFORM_HOOK = 'experimental.chat.messages.transform';
 
 /**
- * Structural handler type for the experimental system-transform hook,
- * deliberately NOT derived from `Hooks['experimental...']`: an
+ * Structural handler type for the experimental messages-transform
+ * hook, deliberately NOT derived from `Hooks['experimental...']`: an
  * installed `@opencode-ai/plugin` whose typings drop the experimental
- * key must not break this module. Verified against
- * @opencode-ai/plugin 1.19.4, which declares the hook.
+ * key must not break this module. The payload carries the session's
+ * message list; the handler communicates by in-place mutation
+ * (appending the memo message).
  */
-type SystemTransformHandler = (
-  input: { sessionID?: string; model: unknown },
-  output: { system: string[] }
+type MessagesTransformHandler = (
+  input: unknown,
+  output: { messages?: unknown[] }
 ) => Promise<void>;
 
 /**
- * Registers the experimental system-transform hook through a widened
+ * Registers the experimental messages-transform hook through a widened
  * record inside a guarded feature check, so registration degrades
  * gracefully (D-risk "wrap registration, degrade"): a typings or
  * runtime version without the hook loads this plugin memo-less rather
@@ -819,14 +836,14 @@ type SystemTransformHandler = (
  * enhancement, never a load requirement (fail-open supervision).
  *
  * @param hooks The hook map being assembled by `server`.
- * @param handler The memo-injection handler (task 3.4).
+ * @param handler The memo-injection handler (FR-016).
  */
-function registerSystemTransform(hooks: Hooks, handler: SystemTransformHandler): void {
+function registerMessagesTransform(hooks: Hooks, handler: MessagesTransformHandler): void {
   try {
     if (typeof handler !== 'function') {
       return;
     }
-    (hooks as Record<string, unknown>)[SYSTEM_TRANSFORM_HOOK] = handler;
+    (hooks as Record<string, unknown>)[MESSAGES_TRANSFORM_HOOK] = handler;
   } catch {
     // Memo-less degradation; never fail plugin load.
   }
@@ -1532,22 +1549,43 @@ const server = async (input: PluginInput, options?: PluginOptions): Promise<Hook
     },
   };
 
-  // Memo injection (design D1; task 3.4; FR-016): registered through
-  // the guarded helper so absence of the experimental hook degrades to
-  // memo-less operation instead of failing plugin load (D-risk).
-  const systemTransform: SystemTransformHandler = async (hookInput, output) => {
+  // Memo injection (FR-016): registered through the guarded helper so
+  // absence of the experimental hook degrades to memo-less operation
+  // instead of failing plugin load (D-risk). Delivery surface is the
+  // message-list transform — OpenCode 1.19.0 discards system-transform
+  // payload mutations (design.md FR-016 amendment, 2026-10-27), while
+  // messages-transform mutations wire-verified to reach the model.
+  const messagesTransform: MessagesTransformHandler = async (_hookInput, output) => {
     try {
-      // Self-suppression first (see `auditorSessionIds`): never inject
-      // the supervision memo into the plugin's own audit calls.
-      if (isAuditorSessionId(hookInput?.sessionID)) {
+      const msgs = Array.isArray(output?.messages) ? output.messages : undefined;
+      // Array-guarded so an odd payload — no message list at all —
+      // never throws.
+      if (msgs === undefined || msgs.length === 0) {
         return;
       }
-      // Graceful lookup (FR-016): a dispatch without a sessionID, or
-      // for a session this plugin holds no state for, leaves the
-      // system prompt untouched. `peek` never initializes, so a
-      // transform-only session cannot create state as a side effect.
-      const sessionId = hookInput?.sessionID;
-      const state = typeof sessionId === 'string' ? sessionState.peek(sessionId) : undefined;
+      // The payload does not carry a sessionID field; derive it from
+      // the session's own messages (every message info carries one).
+      let sessionId: string | undefined;
+      for (const candidate of msgs) {
+        const candidateId = (candidate as { info?: { sessionID?: unknown } } | null)?.info?.sessionID;
+        if (typeof candidateId === 'string') {
+          sessionId = candidateId;
+          break;
+        }
+      }
+      if (sessionId === undefined) {
+        return;
+      }
+      // Self-suppression first (see `auditorSessionIds`): never inject
+      // the supervision memo into the plugin's own audit calls.
+      if (isAuditorSessionId(sessionId)) {
+        return;
+      }
+      // Graceful lookup (FR-016): a dispatch for a session this plugin
+      // holds no state for leaves the message list untouched. `peek`
+      // never initializes, so a transform-only session cannot create
+      // state as a side effect.
+      const state = sessionState.peek(sessionId);
       if (state === undefined) {
         return;
       }
@@ -1565,25 +1603,36 @@ const server = async (input: PluginInput, options?: PluginOptions): Promise<Hook
         },
         resolveHookConfig().memoLimits
       );
-      // Nothing to show (no goal, no log entries): the system prompt
+      // Nothing to show (no goal, no log entries): the message list
       // stays untouched — the memo is an enhancement, never a
       // requirement (FR-016).
       if (memo === null) {
         return;
       }
-      // Convention (verified against the 1.19.4 typings): the hook
-      // returns Promise<void> and communicates by in-place mutation of
-      // the output, so the memo lands as one new system element after
-      // the host's prompt. Array-guarded so an odd payload — no
-      // system array at all — never throws.
-      if (Array.isArray(output?.system)) {
-        output.system.push(memo);
-      }
+      // Wire-verified shape (OpenCode 1.19.0): append a user-role
+      // message with info + a single text part; the addition is
+      // transform-time only (never persisted to the session), so it is
+      // re-appended fresh each turn. The framing prefix distinguishes
+      // supervisor context from user prose.
+      msgs.push({
+        info: {
+          id: `supervisor-memo-${++memoMessageSeq}`,
+          sessionID: sessionId,
+          role: 'user',
+          time: { created: Date.now() },
+        },
+        parts: [
+          {
+            type: 'text',
+            text: `[supervisor] session memo — supervisor context, not user input:\n${memo}`,
+          },
+        ],
+      });
     } catch (error) {
-      console.error('[supervisor] system transform failed open:', errorText(error));
+      console.error('[supervisor] messages transform failed open:', errorText(error));
     }
   };
-  registerSystemTransform(hooks, systemTransform);
+  registerMessagesTransform(hooks, messagesTransform);
 
   return hooks;
 };

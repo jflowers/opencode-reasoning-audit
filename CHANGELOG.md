@@ -7,6 +7,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- Memo delivery moved from `experimental.chat.system.transform`
+  to `experimental.chat.messages.transform`: OpenCode 1.19.0
+  discards system-transform payload mutations (the request is
+  built from the pre-hook system array; verified by gateway wire
+  capture, which also exonerated the gateway and the AI SDK
+  chain). The memo now rides one trailing user message per user
+  prompt — transform-time only, never persisted to the session,
+  rebuilt fresh each turn — a payload shape wire-verified on the
+  same build. Memo content, bounds, and configuration are
+  unchanged; the dead system-transform registration was removed
+  (keeping both would double-deliver on a fixed OpenCode build).
+  Evidence and decision record:
+  `openspec/changes/audit-supervisor/design.md` (FR-016).
 - README overhauled: lede-first opening, a "what it catches" failure
   mode table, quickstart promoted to Section 3, a mermaid diagram of
   the supervision loop, and historical content (research origin, 1.x

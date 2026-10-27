@@ -168,11 +168,13 @@ short outcome) joins a bounded log.
 
 ### 4.3 The Supervisor Memo
 
-Before each model call, `experimental.chat.system.transform` appends a
-bounded memo to the system prompt: session goal, active directives,
-reminders, recently solved items, agent reports, and recent critiques.
-Whether the model receives it depends on the gateway honoring pushed
-secondary system messages (Section 9).
+Before each user prompt, `experimental.chat.messages.transform` appends a
+bounded memo to the conversation as one trailing user message: session goal,
+active directives, reminders, recently solved items, agent reports, and
+recent critiques. The message is transform-time only (never persisted,
+rebuilt fresh each turn) and is wire-verified against OpenCode 1.19.0 —
+the earlier `system.transform` delivery was dropped by that build
+(Section 9).
 
 ### 4.4 Hook Map
 
@@ -188,7 +190,7 @@ tuple registration — Section 6):
 | `tool.execute.before` | Tool guard: blocks reward-hacking tool calls, engineer-directive violations, and file paths absent from the verified trace (never blocks when the trace is empty); holds approve-gated calls for engineer approval and review-gated calls for a passed peer audit (agent-console tools are exempt so `request_audit` stays reachable); records directive triggers. |
 | `tool.execute.after` | Appends a solved item (tool name + short outcome) to a bounded log. |
 | `tool` | Agent console: registers `remind_me` / `forget_reminder` (durable reminders), `recall` (full retained state), `report` (self-reported events), and `request_audit` (on-demand peer audit) (Section 5). |
-| `experimental.chat.system.transform` | Appends the supervisor memo to the system prompt. Degrades gracefully (memo-less operation) when the hook is absent. |
+| `experimental.chat.messages.transform` | Appends the supervisor memo to the conversation as one trailing user message per user prompt. Degrades gracefully (memo-less operation) when the hook is absent. |
 | `dispose` | Clears all in-process session state. |
 
 All logic lives in pure `src/` modules that import no OpenCode APIs;
@@ -384,11 +386,16 @@ cp skills/reasoning-auditor/skill.md ~/.config/opencode/skills/reasoning-auditor
 
 - Tested against OpenCode **1.19.0** and `@opencode-ai/plugin`
   **^1.19.4**. The memo uses the experimental
-  `experimental.chat.system.transform` hook and degrades gracefully
+  `experimental.chat.messages.transform` hook and degrades gracefully
   (memo-less operation) when the hook is absent.
-- Tested model gateways (enmaas, OpenRouter) drop pushed secondary
-  system messages, so memo content may never reach the model depending
-  on the gateway (evidence: `openspec/changes/audit-supervisor/design.md`).
+- OpenCode 1.19.0 discards `experimental.chat.system.transform` payload
+  mutations — the request is built from the pre-hook system array, so
+  the original system-prompt memo delivery never reached the model
+  (evidence: `openspec/changes/audit-supervisor/design.md`). Gateways
+  and the AI SDK chain were exonerated by direct wire capture. The
+  memo now rides `experimental.chat.messages.transform` (payload
+  mutations wire-verified on the same build) as one trailing user
+  message per user prompt.
   Reminders carry a second channel: the `remind_me` result echoes the
   stored text into the conversation.
 - The critique is delivered as a synthetic-marked user message; the V1

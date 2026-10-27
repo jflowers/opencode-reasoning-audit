@@ -348,7 +348,7 @@ test('plugin module imports cleanly and exports the PluginModule entry', async (
   assert.equal(typeof hooks['chat.message'], 'function');
   assert.equal(typeof hooks['tool.execute.before'], 'function');
   assert.equal(typeof hooks['tool.execute.after'], 'function');
-  assert.equal(typeof hooks['experimental.chat.system.transform'], 'function');
+  assert.equal(typeof hooks['experimental.chat.messages.transform'], 'function');
   assert.equal(typeof hooks.dispose, 'function');
   // FR-020/FR-021: the agent console tools register alongside the hooks.
   assert.equal(typeof hooks.tool?.remind_me?.execute, 'function');
@@ -684,7 +684,7 @@ interface DispatchHooks {
   'chat.message'?(input: unknown, output: unknown): Promise<void>;
   'tool.execute.before'?(input: unknown, output: unknown): Promise<void>;
   'tool.execute.after'?(input: unknown, output: unknown): Promise<void>;
-  'experimental.chat.system.transform'?(input: unknown, output: unknown): Promise<void>;
+  'experimental.chat.messages.transform'?(input: unknown, output: unknown): Promise<void>;
   dispose?(): Promise<void>;
 }
 
@@ -1244,9 +1244,37 @@ function dispatchToolAfter(hooks: DispatchHooks, sessionID: string, tool: string
   return hooks['tool.execute.after']!({ tool, sessionID, callID: 'call-1', args: {} }, output);
 }
 
-/** Dispatches one system-transform invocation through the hook. */
-function dispatchSystemTransform(hooks: DispatchHooks, input: unknown, output: unknown): Promise<void> {
-  return hooks['experimental.chat.system.transform']!(input, output);
+/** A session message in the messages-transform payload shape. */
+function sessionMessage(sessionID: string | undefined): Record<string, unknown> {
+  const info: Record<string, unknown> = { id: 'msg-1', role: 'user', time: { created: 1 } };
+  if (sessionID !== undefined) {
+    info.sessionID = sessionID;
+  }
+  return { info, parts: [{ type: 'text', text: 'user turn' }] };
+}
+
+/**
+ * Dispatches one memo messages-transform invocation and returns the
+ * payload list; `omitMessages` dispatches an output with no messages
+ * array at all (odd-payload guard).
+ */
+async function dispatchMemoTransform(
+  hooks: DispatchHooks,
+  sessionID: string | undefined,
+  options: { omitMessages?: boolean } = {}
+): Promise<unknown[]> {
+  const messages: unknown[] = [sessionMessage(sessionID)];
+  await hooks['experimental.chat.messages.transform']!(
+    undefined,
+    options.omitMessages === true ? {} : { messages }
+  );
+  return messages;
+}
+
+/** Extracts a messages-transform message's text (joined text parts). */
+function messageText(message: unknown): string {
+  const parts = (message as { parts?: Array<{ type?: string; text?: unknown }> }).parts ?? [];
+  return parts.filter((part) => part.type === 'text').map((part) => String(part.text)).join('\n');
 }
 
 test('chat.message captures the first user message as the session goal', async () => {
@@ -1418,11 +1446,11 @@ test('tool.execute.after retains solved items beyond the memo render cap (design
       ['first output', 'second output', 'third output']
     );
     // FR-017 render bound: the memo still shows only the two most recent.
-    const system: string[] = ['base prompt'];
-    await dispatchSystemTransform(hooks, { sessionID, model: {} }, { system });
-    assert.ok(system[1]!.includes('second output'));
-    assert.ok(system[1]!.includes('third output'));
-    assert.ok(!system[1]!.includes('first output'));
+    const messages = await dispatchMemoTransform(hooks, sessionID);
+    const memo = messageText(messages[1]);
+    assert.ok(memo.includes('second output'));
+    assert.ok(memo.includes('third output'));
+    assert.ok(!memo.includes('first output'));
   });
 });
 
@@ -1450,15 +1478,15 @@ test('critique delivery retains the critique log beyond the memo render cap (des
       state.critiqueLog.map((entry) => entry.delivered),
       [true, true, true]
     );
-    const system: string[] = ['base prompt'];
-    await dispatchSystemTransform(hooks, { sessionID, model: {} }, { system });
-    assert.ok(system[1]!.includes('Recent critiques:'));
-    assert.ok(!system[1]!.includes(state.critiqueLog[0].text));
-    assert.ok(system[1]!.includes(state.critiqueLog[2].text));
+    const messages = await dispatchMemoTransform(hooks, sessionID);
+    const memo = messageText(messages[1]);
+    assert.ok(memo.includes('Recent critiques:'));
+    assert.ok(!memo.includes(state.critiqueLog[0].text));
+    assert.ok(memo.includes(state.critiqueLog[2].text));
   });
 });
 
-test('system transform appends the supervision memo to the system prompt', async () => {
+test('messages transform appends the supervision memo as a user message', async () => {
   await withCleanAuditEnv(async () => {
     const hooks = await plugin.server(mockPluginInput());
     const sessionID = 'memo-session-full';
@@ -1479,14 +1507,17 @@ test('system transform appends the supervision memo to the system prompt', async
       delivered: true,
     });
 
-    const system = ['You are a helpful assistant.'];
-    await dispatchSystemTransform(hooks, { sessionID, model: {} }, { system });
+    const messages = await dispatchMemoTransform(hooks, sessionID);
 
-    // FR-016: the memo lands as one new system element after the
-    // original prompt, carrying every populated section.
-    assert.equal(system.length, 2);
-    assert.equal(system[0], 'You are a helpful assistant.');
-    const memo = system[1];
+    // FR-016: the memo lands as one new trailing user message after
+    // the conversation, carrying every populated section.
+    assert.equal(messages.length, 2);
+    assert.equal(messageText(messages[0]), 'user turn');
+    const memoMessage = messages[1] as { info?: { role?: string; sessionID?: string } };
+    assert.equal(memoMessage.info?.role, 'user');
+    assert.equal(memoMessage.info?.sessionID, sessionID);
+    const memo = messageText(messages[1]);
+    assert.ok(memo.includes('[supervisor]'));
     assert.ok(memo.includes('Session goal:'));
     assert.ok(memo.includes('Ship the memo injection'));
     assert.ok(memo.includes('Recently solved:'));
@@ -1498,43 +1529,39 @@ test('system transform appends the supervision memo to the system prompt', async
   });
 });
 
-test('system transform leaves the system prompt untouched when nothing is populated', async () => {
+test('messages transform leaves the payload untouched when nothing is populated', async () => {
   await withCleanAuditEnv(async () => {
     const hooks = await plugin.server(mockPluginInput());
     const sessionID = 'memo-session-empty';
 
     // A known session with no goal, no solves, no critiques.
     sessionState.get(sessionID);
-    const system = ['base prompt'];
-    await dispatchSystemTransform(hooks, { sessionID, model: {} }, { system });
+    const messages = await dispatchMemoTransform(hooks, sessionID);
 
-    // buildMemo returned null: no memo element, same array.
-    assert.equal(system.length, 1);
-    assert.equal(system[0], 'base prompt');
+    // buildMemo returned null: no memo message, same payload.
+    assert.equal(messages.length, 1);
+    assert.equal(messageText(messages[0]), 'user turn');
   });
 });
 
-test('system transform degrades gracefully without a session or on odd payloads', async () => {
+test('messages transform degrades gracefully without a session or on odd payloads', async () => {
   await withCleanAuditEnv(async () => {
     const hooks = await plugin.server(mockPluginInput());
 
-    // No sessionID on the dispatch: nothing to look up.
-    const withoutSession = ['base prompt'];
-    await assert.doesNotReject(() => dispatchSystemTransform(hooks, { model: {} }, { system: withoutSession }));
+    // No sessionID derivable from the payload messages: nothing to
+    // look up.
+    const withoutSession = await dispatchMemoTransform(hooks, undefined);
     assert.equal(withoutSession.length, 1);
 
     // Unknown session: no state exists — and none is created.
-    const unknownSession = ['base prompt'];
-    await assert.doesNotReject(() =>
-      dispatchSystemTransform(hooks, { sessionID: 'memo-unknown-session', model: {} }, { system: unknownSession })
-    );
+    const unknownSession = await dispatchMemoTransform(hooks, 'memo-unknown-session');
     assert.equal(unknownSession.length, 1);
     assert.equal(sessionState.peek('memo-unknown-session'), undefined);
 
     // Odd payload — a populated session whose output carries no
-    // system array: the array guard holds, nothing throws.
+    // messages array: the array guard holds, nothing throws.
     sessionState.get('memo-odd-session').goal = 'a goal';
-    await assert.doesNotReject(() => dispatchSystemTransform(hooks, { sessionID: 'memo-odd-session', model: {} }, {}));
+    await assert.doesNotReject(() => dispatchMemoTransform(hooks, 'memo-odd-session', { omitMessages: true }));
   });
 });
 
@@ -1910,7 +1937,7 @@ test("hooks ignore the plugin's own auditor side sessions (self-suppression)", a
     // mutate plugin state or spawn work if the hooks did not
     // short-circuit: a completed reasoning part (recursive audit), a
     // user message (goal capture), a tool call (guard trace state and
-    // solved items), and a system transform (memo injection).
+    // solved items), and a messages transform (memo injection).
     await dispatchPart(
       hooks,
       completedReasoningPart({ sessionID: 'auditor-side-live', id: 'part-side', messageID: 'msg-side' })
@@ -1921,18 +1948,17 @@ test("hooks ignore the plugin's own auditor side sessions (self-suppression)", a
     });
     await dispatchToolBefore(hooks, 'auditor-side-live', 'read', { filePath: 'src/anything.ts' });
     await dispatchToolAfter(hooks, 'auditor-side-live', 'bash', { title: 't', output: 'side output', metadata: {} });
-    const system = ['base prompt'];
-    await dispatchSystemTransform(hooks, { sessionID: 'auditor-side-live', model: {} }, { system });
+    const sideMessages = await dispatchMemoTransform(hooks, 'auditor-side-live');
 
     // All of it ignored: no recursive audit (create stays at one), no
     // critique traffic, no state entry for the side session, and no
-    // memo element — the supervised conversation, not the plugin's
+    // memo message — the supervised conversation, not the plugin's
     // own machinery, is what these hooks observe.
     assert.equal(calls.create.length, 1);
     assert.equal(calls.promptAsync.length, 0);
     assert.equal(calls.abort.length, 0);
     assert.equal(sessionState.peek('auditor-side-live'), undefined);
-    assert.equal(system.length, 1);
+    assert.equal(sideMessages.length, 1);
 
     // Release the parked audit: it completes normally for the
     // supervised session — the passed step lands in its trace, and

@@ -4,9 +4,10 @@
  * active engineer directives (FR-030), the agent's reminders
  * (FR-020), the solved-items log (FR-014), the agent's self-reported
  * events (FR-036), and the prior-critiques log (FR-015) — into the
- * bounded memo appended to the system prompt before each model call
- * (FR-016). Each section appears only when it has content; a session
- * with nothing to show yields no memo at all, so the system prompt is
+ * bounded memo delivered as one trailing user message per user
+ * prompt via `experimental.chat.messages.transform` (FR-016).
+ * Each section appears only when it has content; a session
+ * with nothing to show yields no memo at all, so the payload is
  * left untouched. Solved items, critiques, reminders, and agent
  * reports are capped at configurable maximums, keeping the most recent
  * entries, so the memo cannot grow without limit across a long session

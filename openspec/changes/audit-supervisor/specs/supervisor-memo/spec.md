@@ -45,15 +45,23 @@ in the session, so the agent sees prior findings in context.
 
 ### Requirement: FR-016 Memo injection before each model call
 Before each model call in a supervised session, the system SHALL
-append a supervision memo to the system prompt containing the
-session goal, the solved-items log, and prior critiques, each
-section present only when it has content.
+append a supervision memo to the conversation as one trailing
+user message — via the `experimental.chat.messages.transform`
+hook, whose payload mutations reach the model request on
+OpenCode 1.19.0 — containing the session goal, the solved-items
+log, and prior critiques, each section present only when it has
+content. The memo message is transform-time only: it is never
+persisted to the session and is rebuilt fresh on each user
+prompt. (Amendment 2026-10-27: delivery moved off
+`experimental.chat.system.transform`, whose payload mutations
+the OpenCode 1.19.0 build discards before building the
+request.)
 
 #### Scenario: Memo carries goal and solved items
 - **WHEN** a model call occurs in a session with a recorded goal
   and two solved items
-- **THEN** the system prompt includes a memo section listing the
-  goal and both items
+- **THEN** the conversation gains one trailing memo message
+  listing the goal and both items
 
 #### Scenario: Empty sections are omitted
 - **WHEN** a session has a goal but no solved items or critiques
@@ -61,7 +69,7 @@ section present only when it has content.
 
 #### Scenario: Sessions without a memo are untouched
 - **WHEN** a session has no goal, solved items, or critiques
-- **THEN** the system prompt is unchanged
+- **THEN** the conversation payload is unchanged
 
 ### Requirement: FR-017 Memo is bounded
 The memo SHALL have bounded size: solved items and critiques are

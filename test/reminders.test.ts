@@ -59,9 +59,28 @@ function dispatchPart(hooks: Hooks, part: unknown): Promise<void> {
   return hooks.event!({ event: { type: 'message.part.updated', properties: { part } } } as unknown as EventHookInput);
 }
 
-/** Dispatches one system-transform invocation through the hook. */
-function dispatchSystemTransform(hooks: Hooks, input: unknown, output: unknown): Promise<void> {
-  return hooks['experimental.chat.system.transform']!(input, output);
+/** A session message in the messages-transform payload shape. */
+function sessionMessage(sessionID: string): Record<string, unknown> {
+  return {
+    info: { id: 'msg-1', sessionID, role: 'user', time: { created: 1 } },
+    parts: [{ type: 'text', text: 'user turn' }],
+  };
+}
+
+/** Dispatches one memo messages-transform invocation; returns the payload. */
+async function dispatchMemoTransform(hooks: Hooks, sessionID: string): Promise<unknown[]> {
+  const messages: unknown[] = [sessionMessage(sessionID)];
+  const dispatch = hooks['experimental.chat.messages.transform'] as
+    | ((input: unknown, output: unknown) => Promise<void>)
+    | undefined;
+  await dispatch?.(undefined, { messages });
+  return messages;
+}
+
+/** Extracts a messages-transform message's text (joined text parts). */
+function messageText(message: unknown): string {
+  const parts = (message as { parts?: Array<{ type?: string; text?: unknown }> }).parts ?? [];
+  return parts.filter((part) => part.type === 'text').map((part) => String(part.text)).join('\n');
 }
 
 /** Every OPENCODE_SUPERVISOR_* knob, for env-cleaning around hook-layer tests. */
@@ -311,17 +330,17 @@ test('forget_reminder reports when the session has no reminders', async () => {
   });
 });
 
-test('the memo transform injects stored reminders into the system prompt', async () => {
+test('the memo transform injects stored reminders as a memo message', async () => {
   await withCleanReminderEnv(async () => {
     const hooks = await plugin.server(mockPluginInput());
     const sessionID = 'reminders-memo-session';
     await hooks.tool!.remind_me.execute({ text: 'use bash 4.5 for the test suite' }, toolContext(sessionID));
-    const system: string[] = ['base prompt'];
-    await dispatchSystemTransform(hooks, { sessionID, model: {} }, { system });
+    const messages = await dispatchMemoTransform(hooks, sessionID);
     // FR-022: reminders ride the memo, so they survive context compaction.
-    assert.equal(system.length, 2);
-    assert.ok(system[1]!.includes('Reminders:'));
-    assert.ok(system[1]!.includes('- r1: use bash 4.5 for the test suite'));
+    assert.equal(messages.length, 2);
+    const memo = messageText(messages[1]);
+    assert.ok(memo.includes('Reminders:'));
+    assert.ok(memo.includes('- r1: use bash 4.5 for the test suite'));
   });
 });
 

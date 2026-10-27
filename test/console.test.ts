@@ -73,9 +73,28 @@ function dispatchToolAfter(hooks: Hooks, sessionID: string, tool: string, output
   return hooks['tool.execute.after']!({ tool, sessionID, callID: 'call-1', args: {} }, output);
 }
 
-/** Dispatches one system-transform invocation through the hook. */
-function dispatchSystemTransform(hooks: Hooks, input: unknown, output: unknown): Promise<void> {
-  return hooks['experimental.chat.system.transform']!(input, output);
+/** A session message in the messages-transform payload shape. */
+function sessionMessage(sessionID: string): Record<string, unknown> {
+  return {
+    info: { id: 'msg-1', sessionID, role: 'user', time: { created: 1 } },
+    parts: [{ type: 'text', text: 'user turn' }],
+  };
+}
+
+/** Dispatches one memo messages-transform invocation; returns the payload. */
+async function dispatchMemoTransform(hooks: Hooks, sessionID: string): Promise<unknown[]> {
+  const messages: unknown[] = [sessionMessage(sessionID)];
+  const dispatch = hooks['experimental.chat.messages.transform'] as
+    | ((input: unknown, output: unknown) => Promise<void>)
+    | undefined;
+  await dispatch?.(undefined, { messages });
+  return messages;
+}
+
+/** Extracts a messages-transform message's text (joined text parts). */
+function messageText(message: unknown): string {
+  const parts = (message as { parts?: Array<{ type?: string; text?: unknown }> }).parts ?? [];
+  return parts.filter((part) => part.type === 'text').map((part) => String(part.text)).join('\n');
 }
 
 /** Every OPENCODE_SUPERVISOR_* knob, for env-cleaning around hook-layer tests. */
@@ -367,25 +386,25 @@ test('report bounds stored reports to the configured maxReports', async () => {
       ['second', 'third']
     );
     // FR-036 (render side): the memo shows the same bounded list.
-    const system: string[] = ['base prompt'];
-    await dispatchSystemTransform(hooks, { sessionID: 'console-report-bound', model: {} }, { system });
-    assert.ok(system[1]!.includes('- [note] second'));
-    assert.ok(system[1]!.includes('- [note] third'));
-    assert.ok(!system[1]!.includes('- [note] first'));
+    const messages = await dispatchMemoTransform(hooks, 'console-report-bound');
+    const memo = messageText(messages[1]);
+    assert.ok(memo.includes('- [note] second'));
+    assert.ok(memo.includes('- [note] third'));
+    assert.ok(!memo.includes('- [note] first'));
   });
 });
 
-test('the memo transform injects stored reports into the system prompt', async () => {
+test('the memo transform injects stored reports as a memo message', async () => {
   await withCleanConsoleEnv(async () => {
     const hooks = await plugin.server(mockPluginInput());
     const sessionID = 'console-report-memo';
     await hooks.tool!.report.execute({ kind: 'deviation', text: 'skipped the flaky test' }, toolContext(sessionID));
-    const system: string[] = ['base prompt'];
-    await dispatchSystemTransform(hooks, { sessionID, model: {} }, { system });
+    const messages = await dispatchMemoTransform(hooks, sessionID);
     // FR-036: reports ride the memo, so they survive context compaction.
-    assert.equal(system.length, 2);
-    assert.ok(system[1]!.includes('Agent reports:'));
-    assert.ok(system[1]!.includes('- [deviation] skipped the flaky test'));
+    assert.equal(messages.length, 2);
+    const memo = messageText(messages[1]);
+    assert.ok(memo.includes('Agent reports:'));
+    assert.ok(memo.includes('- [deviation] skipped the flaky test'));
   });
 });
 
@@ -403,10 +422,10 @@ test('recall returns the full retained solved items beyond the memo render cap',
     assert.equal(state.solvedItems.length, 8);
     assert.equal(SOLVED_RETENTION_CAP, 50);
     // ...the memo still shows only the five most recent...
-    const system: string[] = ['base prompt'];
-    await dispatchSystemTransform(hooks, { sessionID, model: {} }, { system });
-    assert.ok(system[1]!.includes('step eight done'));
-    assert.ok(!system[1]!.includes('step one done'));
+    const messages = await dispatchMemoTransform(hooks, sessionID);
+    const memo = messageText(messages[1]);
+    assert.ok(memo.includes('step eight done'));
+    assert.ok(!memo.includes('step one done'));
     // ...and recall reaches the entries the memo no longer shows.
     const result = await hooks.tool!.recall.execute({ what: 'solved' }, toolContext(sessionID));
     assert.ok(result.includes('step one done'));

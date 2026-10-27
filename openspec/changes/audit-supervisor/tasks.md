@@ -71,11 +71,12 @@
   severe.
 - [x] 3.4 [P] Wire goal capture (`chat.message`, first user
   message), solved-items logging (`tool.execute.after`), and memo
-  injection (`experimental.chat.system.transform`) using
-  `buildMemo`; registration must degrade gracefully when the
-  experimental hook is absent (FR-013..FR-016). Verify: unit
+  injection (originally `experimental.chat.system.transform`,
+  moved to `experimental.chat.messages.transform` by task 4.4)
+  using `buildMemo`; registration must degrade gracefully when
+  the experimental hook is absent (FR-013..FR-016). Verify: unit
   tests with mocked hooks assert goal capture, log bounding, and
-  memo content in the transformed system prompt.
+  memo content in the transformed payload.
 - [x] 3.5 [P] Wire the tool guard into `tool.execute.before`
   using the spike-confirmed block strategy against the session's
   verified trace (FR-009..FR-012). Verify: unit tests with mocked
@@ -99,6 +100,15 @@
   and a reward-hack attempt in a real session; observe steer
   critique, interrupt, tool block, and memo. Verify: observed
   behaviors recorded against FR-007, FR-008, FR-009, FR-016.
+- [x] 4.4 Move memo delivery from
+  `experimental.chat.system.transform` (mutations discarded by
+  the OpenCode 1.19.0 build; design.md FR-016 amendment) to
+  `experimental.chat.messages.transform` (wire-verified on the
+  same build): append the memo as one trailing user message per
+  user prompt, keep auditor-side-session suppression and the
+  graceful registration guard, remove the dead system-transform
+  registration (FR-016). Verify: both runtimes green with the
+  hook-layer tests retargeted to the messages-transform payload.
 
 ## Workflow follow-up
 
