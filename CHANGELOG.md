@@ -34,9 +34,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   invariants, the tool guard, and the memo remain active — and one
   warning names the state. The auditor variant is optional and is
   omitted from the side-session prompt when unset (FR-047..FR-051).
-
-### Changed
-
 - Memo delivery moved from `experimental.chat.system.transform`
   to `experimental.chat.messages.transform`: OpenCode 1.19.0
   discards system-transform payload mutations (the request is
@@ -58,6 +55,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   and this changelog own that history. Docs-only: no behavior changed;
   every configuration knob, tool, rule kind, and limitation remains
   documented (#28).
+
+### Migration notes
+
+- `resolveHookConfig`'s signature reordered: session overrides are
+  now the second positional argument behind the new sources object
+  (`{ project, global, options, derivedModel }`). A caller still
+  passing session overrides positionally has them silently ignored —
+  migrate to named properties.
+- `createInvokeModel` now requires the logger as its third argument;
+  the previous two-argument form throws inside error logging.
+- The supervisor config files (`<project>/.opencode/supervisor/config.json`,
+  `${XDG_CONFIG_HOME:-~/.config}/opencode/supervisor/config.json`)
+  are read once per server start and are now agent-write-protected:
+  supervised tool calls touching them are blocked, like the
+  approvals file. Edit them as the engineer, then restart OpenCode
+  to apply.
 
 ## [2.4.0] - 2026-10-26
 

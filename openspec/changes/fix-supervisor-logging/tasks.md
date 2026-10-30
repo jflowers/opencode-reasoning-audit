@@ -76,7 +76,7 @@
   test files require it; add `test/plugin-log.test.ts` and
   `test/config-file.test.ts` to the Node list. Verify:
   `node --test` runs all eight files green.
-- [ ] 5.2 [P] Update docs: `README.md` config table (no hardcoded
+- [x] 5.2 [P] Update docs: `README.md` config table (no hardcoded
   default; resolution chain; config-file section; logging
   section), `CHANGELOG.md` 2.5.0 entry, `AGENTS.md`
   config-resolution bullet, `skills/reasoning-auditor/skill.md`

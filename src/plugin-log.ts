@@ -43,6 +43,14 @@ export interface PluginLogger {
 /** Service tag every entry carries in the OpenCode server log. */
 export const PLUGIN_LOG_SERVICE = 'opencode-supervisor';
 
+/**
+ * Cap on dedupe keys (review round 1, LOW): once the set holds this
+ * many entries it clears, so a long-lived process cannot grow the
+ * set without bound and a message first seen before the clear can
+ * log again — bounded memory in exchange for a rare repeat.
+ */
+export const PLUGIN_LOG_DEDUPE_CAP = 512;
+
 const createPluginLogger = (
   client: PluginInput['client'],
   service: string = PLUGIN_LOG_SERVICE
@@ -57,6 +65,9 @@ const createPluginLogger = (
     if (level !== 'info') {
       const key = `${level}:${message}`;
       if (seen.has(key)) return;
+      if (seen.size >= PLUGIN_LOG_DEDUPE_CAP) {
+        seen.clear();
+      }
       seen.add(key);
     }
     try {

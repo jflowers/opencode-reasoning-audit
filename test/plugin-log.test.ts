@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import type { PluginInput } from '@opencode-ai/plugin';
-import { createPluginLogger, PLUGIN_LOG_SERVICE } from '../src/plugin-log.ts';
+import { createPluginLogger, PLUGIN_LOG_DEDUPE_CAP, PLUGIN_LOG_SERVICE } from '../src/plugin-log.ts';
 
 /** Recorded /log call shape. */
 interface RecordedLogCall {
@@ -66,6 +66,23 @@ test('warn and error entries dedupe by level and message; info never dedupes', (
   assert.equal(warns.length, 1);
   assert.equal(errors.length, 2); // 'same error' + 'same warning' at error level
   assert.equal(infos.length, 2);
+});
+
+test('the dedupe set clears at its cap, so pre-cap messages can log again', () => {
+  const { client, calls } = recordingClient();
+  const logger = createPluginLogger(client);
+
+  // Distinct warnings up to and past the cap all deliver.
+  for (let i = 0; i < PLUGIN_LOG_DEDUPE_CAP + 1; i += 1) {
+    logger.warn(`distinct warning ${i}`);
+  }
+  assert.equal(calls.length, PLUGIN_LOG_DEDUPE_CAP + 1);
+
+  // The cap-reaching insert cleared the set, so message #0 —
+  // normally deduplicated from here on — is delivered again.
+  logger.warn('distinct warning 0');
+  assert.equal(calls.length, PLUGIN_LOG_DEDUPE_CAP + 2);
+  assert.equal(calls[calls.length - 1].body?.message, 'distinct warning 0');
 });
 
 test('empty messages are skipped and extra metadata rides the body', () => {

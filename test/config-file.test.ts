@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type { Hooks, PluginInput } from '@opencode-ai/plugin';
 import plugin, { resolveHookConfig } from '../index.ts';
-import { sessionState } from '../index.ts';
+import { logIdentityState, sessionState } from '../index.ts';
 import {
   parseSupervisorConfigFile,
   validateSupervisorConfig,
@@ -108,13 +108,17 @@ const CONFIG_ENV_NAMES = [
   'OPENCODE_SUPERVISOR_MAX_ON_DEMAND_AUDITS',
 ];
 
-/** Cleans every supervisor env knob around one tier test. */
+/** Cleans every supervisor env knob and log-identity flag around one tier test. */
 async function withCleanConfigEnv(run: () => Promise<void>): Promise<void> {
   const saved: Record<string, string | undefined> = {};
   for (const name of CONFIG_ENV_NAMES) {
     saved[name] = process.env[name];
     delete process.env[name];
   }
+  // The identity line and its no-model follow-up are once-per-process
+  // (FR-046); reset so each tier test's harness observes its own.
+  logIdentityState.identityLogged = false;
+  logIdentityState.identitySaidNoModel = false;
   try {
     await run();
   } finally {
@@ -345,12 +349,25 @@ test('a failed derived lookup is retried on the next resolution (FR-049)', async
       assert.ok(
         harness.logEntries.some((entry) => entry.level === 'warn' && entry.message.includes('LLM peer audit disabled'))
       );
+      // Review round 1 (MEDIUM): a failed lookup warns distinctly from
+      // authoritative absence — the frozen 'none' would otherwise be a lie.
+      assert.ok(
+        harness.logEntries.some((entry) => entry.level === 'warn' && entry.message.includes('host model lookup failed'))
+      );
       assert.deepEqual(sessionState.get('config-retry-session').verifiedSteps, ['the rate = 24 * 15 = 360']);
 
       // Second resolution: the retry succeeds and the audit runs.
       await dispatchPart(hooks, completedReasoningPart({ sessionID: 'config-retry-session', id: 'part-r2', messageID: 'msg-2' }));
       assert.deepEqual(harness.titles, ['supervisor-audit @ derived/retry-model']);
       assert.equal(harness.configGetCalls, 2);
+      // Review round 1 (MEDIUM): the late resolution announces itself —
+      // the identity line's earlier 'none' is not the last word.
+      assert.ok(
+        harness.logEntries.some(
+          (entry) =>
+            entry.level === 'info' && entry.message.includes('auditor model resolved: derived/retry-model')
+        )
+      );
       await hooks.dispose!();
     });
   } finally {
@@ -374,6 +391,27 @@ test('with no model anywhere the LLM tier is skipped and the config GET is not r
       );
       // FR-051: the steps still pass through the invariants and verify.
       assert.equal(sessionState.get('config-none-session').verifiedSteps.length, 2);
+      await hooks.dispose!();
+    });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the identity line reports guard toggles and contributing config tiers', async () => {
+  const dir = makeConfigDir('{"blockRewardHacking":false}');
+  try {
+    await withCleanConfigEnv(async () => {
+      const harness = serverHarness(dir, { small_model: 'derived/identity-model' });
+      const hooks = await plugin.server(harness.input);
+      await dispatchPart(hooks, completedReasoningPart({ sessionID: 'config-identity-session' }));
+      const identity = harness.logEntries.find((entry) => entry.level === 'info' && entry.message.includes('loaded'));
+      assert.ok(identity, 'identity line logged');
+      // Review round 1 (HIGH): a flipped guard toggle or an applied
+      // config file must not be silent.
+      assert.ok(identity.message.includes('guards: blockRewardHacking=false'), identity.message);
+      assert.ok(identity.message.includes('stepReference=true'), identity.message);
+      assert.ok(identity.message.includes('config: project file'), identity.message);
       await hooks.dispose!();
     });
   } finally {

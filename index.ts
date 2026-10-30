@@ -144,8 +144,18 @@ export const pluginConfig: HookConfig = {
  */
 const PLUGIN_VERSION = '2.5.0';
 
-/** Emits the module-identity log line once per process — on the first hook-time config resolution (FR-046). */
-let identityLogged = false;
+/**
+ * Log-identity state (FR-046): the module-identity line is emitted
+ * once per process, at the first hook-time config resolution. Held
+ * in an exported object so tests can reset the once-flags between
+ * harnesses (each test server re-registers the plugin).
+ */
+export const logIdentityState = {
+  /** True once the identity line has been emitted. */
+  identityLogged: false,
+  /** True once the identity line has said the auditor is absent; a later-resolving model announces itself (review round 1). */
+  identitySaidNoModel: false,
+};
 
 /** Session shape carrying plugin config overrides — the same key `resolveAuditorConfig` reads, so one override object governs the whole plugin. */
 const PLUGIN_CONFIG_KEY = 'opencode-supervisor';
@@ -994,27 +1004,66 @@ const loadDirectiveFiles = (directory: string, logger: PluginLogger): { name: st
  * silently dissolving. I/O lives here (design D1); parsing and
  * matching are pure in src/gates.ts.
  */
-const readApprovals = (directory: string): { records: ApprovalRecord[]; error: string | null } => {
-  const approvalsPath = path.join(directory, '.opencode', 'supervisor', 'approvals.json');
-  let raw: string;
+/**
+ * Bounded single-descriptor read (review round 1, LOW): opens the file
+ * once and fstats the descriptor, so the size bound and the read apply
+ * to the same file — a path swapped between stat and read (TOCTOU)
+ * cannot slip an oversized file past the bound. An absent file is
+ * reported as absent (absence is a state, not an error); an oversized
+ * file reports the bound error with `what` naming the file kind; any
+ * other failure returns its error text.
+ *
+ * @param filePath Absolute path to read.
+ * @param maxBytes The inclusive upper bound on bytes read.
+ * @param what Name of the file kind, for error messages.
+ * @returns The text read, or an error string; both null means absent.
+ */
+const readBoundedFile = (
+  filePath: string,
+  maxBytes: number,
+  what: string
+): { text: string | null; error: string | null } => {
+  let fd: number;
   try {
-    // Bounded read (FR-045): a planted oversized file fails closed
-    // instead of stalling the event loop.
-    const stats = fs.statSync(approvalsPath);
-    if (stats.size > MAX_APPROVALS_FILE_BYTES) {
-      return {
-        records: [],
-        error: `approvals file is ${stats.size} bytes, exceeding the ${MAX_APPROVALS_FILE_BYTES}-byte read bound`
-      };
-    }
-    raw = fs.readFileSync(approvalsPath, 'utf8');
+    fd = fs.openSync(filePath, 'r');
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      return { records: [], error: null };
+      return { text: null, error: null };
     }
-    return { records: [], error: errorText(error) };
+    return { text: null, error: errorText(error) };
   }
-  return parseApprovals(raw);
+  try {
+    const stats = fs.fstatSync(fd);
+    if (stats.size > maxBytes) {
+      return {
+        text: null,
+        error: `${what} is ${stats.size} bytes, exceeding the ${maxBytes}-byte read bound`,
+      };
+    }
+    const buffer = Buffer.alloc(stats.size);
+    let read = 0;
+    while (read < stats.size) {
+      const count = fs.readSync(fd, buffer, read, stats.size - read, read);
+      if (count === 0) break;
+      read += count;
+    }
+    return { text: buffer.toString('utf8'), error: null };
+  } catch (error) {
+    return { text: null, error: errorText(error) };
+  } finally {
+    fs.closeSync(fd);
+  }
+};
+
+const readApprovals = (directory: string): { records: ApprovalRecord[]; error: string | null } => {
+  const approvalsPath = path.join(directory, '.opencode', 'supervisor', 'approvals.json');
+  // Bounded read (FR-045): a planted oversized file fails closed
+  // instead of stalling the event loop.
+  const { text, error } = readBoundedFile(approvalsPath, MAX_APPROVALS_FILE_BYTES, 'approvals file');
+  if (error !== null || text === null) {
+    return { records: [], error };
+  }
+  return parseApprovals(text);
 };
 
 /**
@@ -1030,23 +1079,11 @@ const readApprovals = (directory: string): { records: ApprovalRecord[]; error: s
  * @returns The validated config subset, or an error string.
  */
 const readSupervisorConfigFile = (configPath: string): ParsedSupervisorConfig => {
-  let raw: string;
-  try {
-    const stats = fs.statSync(configPath);
-    if (stats.size > MAX_CONFIG_FILE_BYTES) {
-      return {
-        config: {},
-        error: `config file is ${stats.size} bytes, exceeding the ${MAX_CONFIG_FILE_BYTES}-byte read bound`,
-      };
-    }
-    raw = fs.readFileSync(configPath, 'utf8');
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      return { config: {}, error: null };
-    }
-    return { config: {}, error: errorText(error) };
+  const { text, error } = readBoundedFile(configPath, MAX_CONFIG_FILE_BYTES, 'config file');
+  if (error !== null || text === null) {
+    return { config: {}, error };
   }
-  return parseSupervisorConfigFile(raw);
+  return parseSupervisorConfigFile(text);
 };
 
 /**
@@ -1122,9 +1159,18 @@ const server = async (input: PluginInput, options?: PluginOptions): Promise<Hook
   // load-time stream.
   const { gates: compiledGates, warnings: gateWarnings } = compileGates(directives);
   const directivesAdvisory = renderDirectivesAdvisory(directives);
-  for (const warning of [...directiveWarnings, ...compileWarnings, ...gateWarnings]) {
-    logger.warn(warning);
-  }
+  // Deferred bootstrap warnings (review round 1, MEDIUM): warnings
+  // collected during server() fire into the listener-down window,
+  // where fire-and-forget delivery (FR-044) loses them and dedupe
+  // (FR-045) would suppress the repeat. They queue here and flush at
+  // first-hook time in `buildConfig` — the identity-line precedent
+  // (design D3), when the HTTP listener is reliably up.
+  const bootstrapWarnings = [
+    ...directiveWarnings,
+    ...compileWarnings,
+    ...gateWarnings,
+  ];
+  let bootstrapFlushed = false;
   // FR-048: file config tiers, read once per plugin start. An absent
   // file is the unconfigured state (silent); a present-but-invalid
   // file is skipped with one warning — the tier dissolves, lower tiers
@@ -1133,11 +1179,11 @@ const server = async (input: PluginInput, options?: PluginOptions): Promise<Hook
     path.join(input.directory, '.opencode', 'supervisor', 'config.json')
   );
   if (projectFile.error !== null) {
-    logger.warn(`project supervisor config file ignored: ${projectFile.error}`);
+    bootstrapWarnings.push(`project supervisor config file ignored: ${projectFile.error}`);
   }
   const globalFile = readSupervisorConfigFile(globalSupervisorConfigPath());
   if (globalFile.error !== null) {
-    logger.warn(`global supervisor config file ignored: ${globalFile.error}`);
+    bootstrapWarnings.push(`global supervisor config file ignored: ${globalFile.error}`);
   }
   // FR-047 options tier: `options.config` from tuple registration,
   // validated like the file tiers (a wrong-typed value rejects the
@@ -1146,7 +1192,7 @@ const server = async (input: PluginInput, options?: PluginOptions): Promise<Hook
     (options as (PluginOptions & { config?: unknown }) | undefined)?.config ?? {}
   );
   if (optionsParsed.error !== null) {
-    logger.warn(`plugin options supervisor config ignored: ${optionsParsed.error}`);
+    bootstrapWarnings.push(`plugin options supervisor config ignored: ${optionsParsed.error}`);
   }
   const optionsConfig = optionsParsed.config;
   // FR-049 derived tier: the OpenCode config's model (small_model
@@ -1155,6 +1201,7 @@ const server = async (input: PluginInput, options?: PluginOptions): Promise<Hook
   // not be up yet at plugin load) is retried on the next resolution.
   let derivedModel: string | undefined;
   let derivedModelResolved = false;
+  let derivedLookupFailed = false;
   const resolveDerivedModel = async (): Promise<string | undefined> => {
     if (derivedModelResolved) {
       return derivedModel;
@@ -1166,8 +1213,10 @@ const server = async (input: PluginInput, options?: PluginOptions): Promise<Hook
         derivedModel = model;
       }
       derivedModelResolved = true;
+      derivedLookupFailed = false;
     } catch {
       // The listener may be down (bootstrap); retry on the next call.
+      derivedLookupFailed = true;
     }
     return derivedModel;
   };
@@ -1191,16 +1240,64 @@ const server = async (input: PluginInput, options?: PluginOptions): Promise<Hook
         config = resolveHookConfig({ ...sources, derivedModel: derived });
       }
     }
-    if (!identityLogged) {
-      identityLogged = true;
+    // Deferred bootstrap warnings (review round 1, MEDIUM): flush on
+    // the FIRST hook of THIS server instance — the identity-line
+    // precedent (design D3), when the HTTP listener is reliably up.
+    // Per-instance, because the identity line itself is
+    // once-per-process: a second server() in the same process (tests
+    // re-registering the plugin) still owns its own deferred
+    // warnings, which must not be swallowed by an identity line
+    // another instance already emitted.
+    if (!bootstrapFlushed) {
+      bootstrapFlushed = true;
+      for (const warning of bootstrapWarnings.splice(0)) {
+        logger.warn(warning);
+      }
+    }
+    if (!logIdentityState.identityLogged) {
+      logIdentityState.identityLogged = true;
+      // Review round 1 (HIGH): the identity line also reports the
+      // guard toggles and which bootstrap config tiers contributed
+      // knobs — a flipped toggle or an applied file is otherwise
+      // completely silent (only failures warn).
+      const configTiers: string[] = [];
+      if (Object.keys(projectFile.config).length > 0) {
+        configTiers.push('project file');
+      }
+      if (Object.keys(globalFile.config).length > 0) {
+        configTiers.push('global file');
+      }
+      if (Object.keys(optionsConfig).length > 0) {
+        configTiers.push('plugin options');
+      }
       logger.info(
-        `v${PLUGIN_VERSION} loaded (auditor: ${config.auditorModel ?? 'none — LLM audit disabled'}, variant: ${
-          config.auditorVariant ?? 'unset'
-        }${directives.length > 0 ? `, directives: ${directives.length}` : ''})`
+        `v${PLUGIN_VERSION} loaded (auditor: ${
+          config.auditorModel ?? (derivedLookupFailed ? 'pending host lookup' : 'none — LLM audit disabled')
+        }, variant: ${config.auditorVariant ?? 'unset'}${
+          directives.length > 0 ? `, directives: ${directives.length}` : ''
+        }, guards: blockRewardHacking=${config.blockRewardHacking}, stepReference=${
+          config.requireStepReferenceInTools
+        }${configTiers.length > 0 ? `, config: ${configTiers.join(' + ')}` : ''})`
       );
+      logIdentityState.identitySaidNoModel = config.auditorModel === undefined;
     }
     if (config.auditorModel === undefined) {
-      logger.warn('LLM peer audit disabled: no auditor model configured (deterministic invariants remain active)');
+      // Review round 1 (MEDIUM): distinguish a failed host lookup
+      // (retrying, the frozen 'none' was premature) from an
+      // authoritative absence, so the log states which it is.
+      if (derivedLookupFailed) {
+        logger.warn(
+          'LLM peer audit disabled: host model lookup failed — will retry on the next event (deterministic invariants remain active)'
+        );
+      } else {
+        logger.warn('LLM peer audit disabled: no auditor model configured (deterministic invariants remain active)');
+      }
+    } else if (logIdentityState.identitySaidNoModel) {
+      // Review round 1 (MEDIUM): a late-resolving model (the FR-049
+      // retry path) must not leave the frozen 'none' as the last
+      // word — the enabling is announced.
+      logIdentityState.identitySaidNoModel = false;
+      logger.info(`auditor model resolved: ${config.auditorModel} — LLM peer audit enabled`);
     }
     return config;
   };
@@ -1404,13 +1501,30 @@ const server = async (input: PluginInput, options?: PluginOptions): Promise<Hook
         ) {
           // FR-044: the approvals file is engineer-authored state;
           // agent tool calls touching it are blocked by default.
-          const touchesApprovals = argPaths.some(
-            (argPath) => (argPath.split('/').pop() || '').toLowerCase() === 'approvals.json'
-          );
-          if (touchesApprovals) {
+          // Review round 1 (HIGH): the supervisor config files share
+          // that trust class — they carry the guard's enforcement
+          // toggles and the auditor model, so an agent that could
+          // write one could silently defang its own supervisor
+          // across restarts. Both the project file
+          // (<dir>/.opencode/supervisor/config.json) and the global
+          // one (~/.config/opencode/supervisor/config.json) end with
+          // the protected suffix.
+          let protectedStateReason: string | null = null;
+          if (argPaths.some((argPath) => (argPath.split('/').pop() || '').toLowerCase() === 'approvals.json')) {
+            protectedStateReason =
+              'the approvals file is engineer-authored state; the supervised agent may not touch it (engineer approval gates depend on it). Ask the engineer to update .opencode/supervisor/approvals.json.';
+          } else if (
+            argPaths.some((argPath) =>
+              argPath.replaceAll('\\', '/').toLowerCase().endsWith('opencode/supervisor/config.json')
+            )
+          ) {
+            protectedStateReason =
+              'the supervisor config file is engineer-authored state; the supervised agent may not touch it (tool-guard toggles and the auditor model depend on it). Ask the engineer to edit the supervisor config.json directly.';
+          }
+          if (protectedStateReason !== null) {
             verification = {
               allowed: false,
-              reason: `Tool '${hookInput.tool}' blocked by the supervisor: the approvals file is engineer-authored state; the supervised agent may not touch it (engineer approval gates depend on it). Ask the engineer to update .opencode/supervisor/approvals.json.`
+              reason: `Tool '${hookInput.tool}' blocked by the supervisor: ${protectedStateReason}`,
             };
           }
           if (verification.allowed && compiledGates.approve.length > 0) {

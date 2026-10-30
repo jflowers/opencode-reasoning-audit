@@ -703,6 +703,29 @@ test('the agent cannot touch the approvals file', async () => {
   });
 });
 
+test('the agent cannot touch the supervisor config file', async () => {
+  await withCleanGatesEnv(async () => {
+    const dir = makeDirectiveDir({});
+    try {
+      const hooks = await plugin.server(mockPluginInput(dir));
+      await assert.rejects(
+        dispatchToolBefore(hooks, 'gate-self-2', 'bash', {
+          command: 'cat .opencode/supervisor/config.json',
+        }),
+        (error: unknown) => {
+          const message = error instanceof Error ? error.message : String(error);
+          assert.ok(message.includes('engineer-authored state'), message);
+          assert.ok(message.includes('supervisor config file'), message);
+          return true;
+        }
+      );
+      await hooks.dispose!();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 test('an oversized approvals file fails closed', async () => {
   await withCleanGatesEnv(async () => {
     const dir = makeDirectiveDir({

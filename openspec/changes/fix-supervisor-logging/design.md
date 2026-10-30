@@ -121,12 +121,27 @@ title degrades to `supervisor-audit @ <model>`.
 - **Bootstrap ordering**: entries emitted before the listener is up
   are lost silently. Accepted: fire-and-forget is the price of
   never blocking hooks; the identity line deliberately moves to
-  first-hook time.
+  first-hook time. Review round 1 narrowed the window: bootstrap
+  warnings (directive/config/options) queue and flush at the same
+  first-hook moment.
 - **Project-file trust**: the project directory is agent-writable
   (a supervised agent could edit its own supervisor config). The
   environment tier outranks it, and config files only tune the
   supervisor, never bypass enforcement — `enforce`/`approve`/
   `review` rules still come from the directives pipeline.
+  Review round 1 correction: the config files carry the guard
+  toggles (`blockRewardHacking`,
+  `requireStepReferenceInTools`) and the auditor model, so
+  "never bypass enforcement" overstated the case. Both config
+  files are therefore agent-write-protected through the tool
+  guard (matching the `approvals.json` precedent); the plugin
+  options tier inherits `opencode.json`'s pre-existing trust
+  class — an agent that could write it could already unregister
+  the plugin — and the identity line now reports the guard
+  toggles and which tiers contributed, so a flipped knob is
+  visible. Numeric knobs (e.g. `maxRegenerations`) stay
+  uncapped by design: they are engineer-authored state, the
+  same trust class as the environment tier.
 - **Dedupe hides recurring distinct failures**: only identical
   level+message pairs collapse; new messages always surface.
 - **Test ripple**: hook tests currently capture `console.*`; they

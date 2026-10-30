@@ -52,7 +52,9 @@ opencode-supervisor/
 │   ├── reminders.test.ts  # Reminder module, memo integration, and tool-layer tests (node:test, Bun and Node)
 │   ├── directives.test.ts # Directive module, guard, trigger, and loader tests (node:test, Bun and Node)
 │   ├── console.test.ts    # Console module, memo integration, and tool-layer tests (node:test, Bun and Node)
-│   └── gates.test.ts      # Gate module, approvals, and hook-layer gate tests (node:test, Bun and Node)
+│   ├── gates.test.ts      # Gate module, approvals, and hook-layer gate tests (node:test, Bun and Node)
+│   ├── plugin-log.test.ts # Plugin logger, dedupe, and delivery-failure tests (node:test, Bun and Node)
+│   └── config-file.test.ts # Supervisor config-file, tier resolution, and hook-layer tests (node:test, Bun and Node)
 ├── skills/
 │   └── reasoning-auditor/ # Standalone skill alternative (no middleware required)
 ├── openspec/              # OpenSpec change management (changes/, specs/, schemas/)
