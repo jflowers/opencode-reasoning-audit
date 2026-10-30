@@ -42,9 +42,11 @@ Each call POSTs `{ service: 'opencode-supervisor', level, message,
 extra }`. Rejected: writing our own log file (second log to
 rotate, no TUI integration), `process.stderr` with a flag (still
 interleaves by default), no-op logging (loses diagnostics). The
-module holds only the client reference and performs no direct I/O,
-preserving the src/ purity convention the same way
-`createInvokeModel` does.
+module is the first client-bound `src/` module, defensible on
+unit-testability grounds — it holds only the client reference,
+keeps no session state, and the client is mocked in tests — rather
+than on a `createInvokeModel` precedent (that helper lives in
+`index.ts`).
 
 ### D2: fire-and-forget, warn/error dedupe, info never deduped
 
@@ -155,18 +157,23 @@ now folds leading dots (`.opencode` ≡ `opencode`, so the
 project tier matches — it had been dead code), protects the
 whole `opencode/supervisor` run (ancestor spellings like
 `rm -rf .opencode/supervisor` are blocked), and for non-bash
-tools reads only operational argument keys (`filePath`, `path`,
-`directory`, `pattern`) — write/edit content is data, never
-scanned. The raw lens is bash-only and capped at 64 KiB: a
+tools scans every argument key except the write/edit content
+keys (`content`, `oldString`, `newString`) — content is data,
+never scanned, and custom and MCP path keys like `target` stay
+covered (review round 4 flagged the operational-key allowlist as
+a regression of the 2.4.0 key-agnostic coverage; the content
+blocklist restores it). The raw lens is bash-only and capped at 64 KiB: a
 command string is an executable operation, so mentions there
 are actionable, and each bash call is a fresh process, so a
 cross-call `cd` cannot persist. Residuals: bash heredoc/echo
-prose can false-positive; custom tools with non-standard
-path-argument key names are not covered by the operational-key
-list; variable indirection (`cat $CFG`) is not caught;
-accepted — the same residual class as any path-based guard.
+prose can false-positive; variable indirection (`cat $CFG`) is
+not caught; accepted — the same residual class as any
+path-based guard.
 - **Dedupe hides recurring distinct failures**: only identical
   level+message pairs collapse; new messages always surface.
+  Dedupe memory is bounded (512 entries): when the cap fills and
+  clears, a previously seen pair can warn again — bounded memory
+  chosen over recurrence visibility.
 - **Test ripple**: hook tests currently capture `console.*`; they
   move to asserting recorded `app.log` calls, and fixtures
   expecting the old hardcoded default change to the derived tier.

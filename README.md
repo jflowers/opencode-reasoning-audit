@@ -157,8 +157,11 @@ flowchart TD
 
 Before any tool runs, `tool.execute.before` checks the call:
 reward-hacking patterns, directive violations (forbidden paths and
-command patterns), and file paths absent from the verified trace are
-blocked. A block throws, so the model receives the reason as a tool
+command patterns), file paths absent from the verified trace, and
+touches on the supervisor's engineer-authored state (the approvals
+file, the supervisor config files, the directives directory, and the
+whole `.opencode/supervisor` directory — FR-061) are blocked. A
+block throws, so the model receives the reason as a tool
 error it can act on. `approve` gates hold matching calls for engineer
 approval; `review` gates hold calls until a passed peer audit
 references the path (Section 6). An empty trace or rule set never
@@ -309,9 +312,16 @@ revokes it; `expires` is evaluated at UTC end of day (the expiry day
 itself still counts). Verification fails closed — an unreadable or
 malformed approvals file blocks the gated call carrying the error,
 while an absent file simply means "not approved". Agent calls
-touching any path whose basename is `approvals.json` are blocked by
-default — the agent cannot self-approve a gate — and agent-console
-tools are exempt from both gate kinds.
+touching the supervisor's engineer-authored state are blocked by
+default: any path whose final segment is `approvals.json` (lookalike
+names like `stale-approvals.json` are not blocked), the supervisor
+config files, the directives directory, and the whole
+`.opencode/supervisor` directory run — ancestor spellings like
+`rm -rf .opencode/supervisor` included. Traversal (`..`) collapses
+and slash-free `cd` spellings are caught by a raw scan of the bash
+command string, and the block reason names the protected object, so
+the agent cannot self-approve a gate or defang its own supervisor.
+Agent-console tools are exempt from both gate kinds.
 
 ---
 
@@ -381,8 +391,11 @@ All plugin diagnostics go to the OpenCode server log (service tag
 `opencode-supervisor`) through the `/log` endpoint — never to
 stdout/stderr, so `[supervisor]` lines cannot corrupt the TUI.
 Delivery is fire-and-forget (a server listener that is not up yet
-absorbs the loss), repeated warn/error entries dedupe per message,
-and the identity line logs once at the first hook invocation.
+absorbs the loss), repeated warn/error entries dedupe per message
+(dedupe memory is bounded — 512 entries — so when the cap fills and
+clears, a previously seen pair can warn again; bounded memory was
+chosen over recurrence visibility), and the identity line logs once
+at the first hook invocation.
 
 ### 7.1 Understanding `stripMode`
 
@@ -447,10 +460,15 @@ cp skills/reasoning-auditor/skill.md ~/.config/opencode/skills/reasoning-auditor
 - A blocked tool surfaces as an error tool result, so the model may
   retry the call (bounded by OpenCode's doom-loop check). Agent
   reports are self-reported and unaudited; recall is read-only.
-- The approvals file is engineer-authored state in the
-  project-directory trust class — pair an `enforce` `forbidPath` rule
-  over `.opencode/supervisor/**` for defense-in-depth. Review gates
-  block the first matching calls of a session until a passing audit
+- The whole `.opencode/supervisor` directory is engineer-authored
+  state protected by the guard itself (a normalized path-token lens
+  plus a raw bash command lens), so an `enforce` `forbidPath` rule
+  over `.opencode/supervisor/**` is optional defense-in-depth.
+  Residuals: bash heredoc/echo prose can false-positive the raw
+  lens; write/edit content is never scanned (content is data, not
+  operation); variable indirection (`cat $CFG`) is not caught; the
+  directory backstop uses the path lens only. Review gates block
+  the first matching calls of a session until a passing audit
   references the path.
 
 ---

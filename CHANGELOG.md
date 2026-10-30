@@ -73,7 +73,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   agents can no longer edit directive files either). Edit them as
   the engineer, then restart OpenCode to apply.
 - `AuditConfig.auditorModel` is now `string | undefined` — the one
-  type-visible change on the exported TypeScript surface.
+  type-visible change on the exported TypeScript surface. The release
+  stays a minor: the plugin ships as source executed directly by the
+  OpenCode host, so there are no compiled downstream type consumers
+  (the consumer set is this repo's tests plus the host runtime, which
+  passes config objects), and the runtime config surface is unchanged.
 
 ## [2.4.0] - 2026-10-26
 

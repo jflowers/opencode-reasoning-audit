@@ -11,6 +11,7 @@ import {
   type Reminder,
 } from '../src/reminders.ts';
 import { buildMemo } from '../src/memo.ts';
+import { silentPluginInput } from './mocks.ts';
 
 /** A stored reminder with a fixed timestamp — the module never touches the clock. */
 function reminder(id: string, text: string): Reminder {
@@ -20,26 +21,6 @@ function reminder(id: string, text: string): Reminder {
 /** Minimal ToolContext: the tools only read `sessionID`. */
 function toolContext(sessionID: string): ToolContext {
   return { sessionID } as unknown as ToolContext;
-}
-
-/** A representative plugin input (same shape as audit.test.ts). */
-function mockPluginInput(): PluginInput {
-  return {
-    client: {
-      session: {
-        create: async () => ({ data: { id: 'mock-side-session' } }),
-        prompt: async () => ({ data: { info: {}, parts: [] } }),
-        promptAsync: async () => ({}),
-        abort: async () => ({}),
-        delete: async () => ({}),
-      },
-      // FR-052/FR-058: the hook layer logs through /log and derives the
-      // auditor model from the OpenCode config — the mock provides both.
-      app: { log: async () => ({}) },
-      config: { get: async () => ({ data: { small_model: 'mock/derived-model' } }) },
-    },
-    directory: '/tmp/supervisor-test',
-  } as unknown as PluginInput;
 }
 
 /** Event-hook input shape, for casting deliberately undeclared event payloads. */
@@ -231,7 +212,7 @@ test('buildMemo bounds the Reminders section by maxReminders', () => {
 
 test('remind_me stores a reminder and echoes it with its id', async () => {
   await withCleanReminderEnv(async () => {
-    const hooks = await plugin.server(mockPluginInput());
+    const hooks = await plugin.server(silentPluginInput());
     const result = await hooks.tool!.remind_me.execute(
       { text: '  use bash 4.5 for the test suite  ' },
       toolContext('reminders-tool-basic')
@@ -253,7 +234,7 @@ test('remind_me stores a reminder and echoes it with its id', async () => {
 
 test('remind_me assigns sequential ids that are never recycled', async () => {
   await withCleanReminderEnv(async () => {
-    const hooks = await plugin.server(mockPluginInput());
+    const hooks = await plugin.server(silentPluginInput());
     const context = toolContext('reminders-tool-sequence');
     await hooks.tool!.remind_me.execute({ text: 'first' }, context);
     await hooks.tool!.remind_me.execute({ text: 'second' }, context);
@@ -266,7 +247,7 @@ test('remind_me assigns sequential ids that are never recycled', async () => {
 
 test('remind_me rejects whitespace-only text without creating session state', async () => {
   await withCleanReminderEnv(async () => {
-    const hooks = await plugin.server(mockPluginInput());
+    const hooks = await plugin.server(silentPluginInput());
     const result = await hooks.tool!.remind_me.execute({ text: '   ' }, toolContext('reminders-tool-empty'));
     assert.ok(result.includes('state the fact to remember'));
     assert.equal(sessionState.peek('reminders-tool-empty'), undefined);
@@ -275,7 +256,7 @@ test('remind_me rejects whitespace-only text without creating session state', as
 
 test('remind_me truncates over-length text and notes it in the result', async () => {
   await withCleanReminderEnv(async () => {
-    const hooks = await plugin.server(mockPluginInput());
+    const hooks = await plugin.server(silentPluginInput());
     const result = await hooks.tool!.remind_me.execute(
       { text: 'a'.repeat(2500) },
       toolContext('reminders-tool-truncate')
@@ -289,7 +270,7 @@ test('remind_me truncates over-length text and notes it in the result', async ()
 test('remind_me bounds stored reminders to the configured maxReminders', async () => {
   await withCleanReminderEnv(async () => {
     process.env.OPENCODE_SUPERVISOR_MEMO_MAX_REMINDERS = '2';
-    const hooks = await plugin.server(mockPluginInput());
+    const hooks = await plugin.server(silentPluginInput());
     const context = toolContext('reminders-tool-bound');
     await hooks.tool!.remind_me.execute({ text: 'first' }, context);
     await hooks.tool!.remind_me.execute({ text: 'second' }, context);
@@ -305,7 +286,7 @@ test('remind_me bounds stored reminders to the configured maxReminders', async (
 
 test('forget_reminder clears a stored reminder', async () => {
   await withCleanReminderEnv(async () => {
-    const hooks = await plugin.server(mockPluginInput());
+    const hooks = await plugin.server(silentPluginInput());
     const context = toolContext('reminders-tool-forget');
     await hooks.tool!.remind_me.execute({ text: 'use bun, not node' }, context);
     const result = await hooks.tool!.forget_reminder.execute({ id: 'r1' }, context);
@@ -316,7 +297,7 @@ test('forget_reminder clears a stored reminder', async () => {
 
 test('forget_reminder lists current ids for an unknown id', async () => {
   await withCleanReminderEnv(async () => {
-    const hooks = await plugin.server(mockPluginInput());
+    const hooks = await plugin.server(silentPluginInput());
     const context = toolContext('reminders-tool-unknown');
     await hooks.tool!.remind_me.execute({ text: 'first' }, context);
     await hooks.tool!.remind_me.execute({ text: 'second' }, context);
@@ -328,7 +309,7 @@ test('forget_reminder lists current ids for an unknown id', async () => {
 
 test('forget_reminder reports when the session has no reminders', async () => {
   await withCleanReminderEnv(async () => {
-    const hooks = await plugin.server(mockPluginInput());
+    const hooks = await plugin.server(silentPluginInput());
     const result = await hooks.tool!.forget_reminder.execute({ id: 'r1' }, toolContext('reminders-tool-none'));
     assert.equal(result, 'No reminder matches "r1" — the session has no reminders.');
   });
@@ -336,7 +317,7 @@ test('forget_reminder reports when the session has no reminders', async () => {
 
 test('the memo transform injects stored reminders as a memo message', async () => {
   await withCleanReminderEnv(async () => {
-    const hooks = await plugin.server(mockPluginInput());
+    const hooks = await plugin.server(silentPluginInput());
     const sessionID = 'reminders-memo-session';
     await hooks.tool!.remind_me.execute({ text: 'use bash 4.5 for the test suite' }, toolContext(sessionID));
     const messages = await dispatchMemoTransform(hooks, sessionID);

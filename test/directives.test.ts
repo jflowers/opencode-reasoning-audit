@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type { Hooks, PluginInput } from '@opencode-ai/plugin';
 import plugin, { sessionState } from '../index.ts';
-import { recordingPluginInput } from './mocks.ts';
+import { recordingPluginInput, silentPluginInput } from './mocks.ts';
 import {
   activeDirectives,
   compileEnforcement,
@@ -44,27 +44,8 @@ function makeDirectiveDir(files: Record<string, string>): string {
   return dir;
 }
 
-/** A representative plugin input pointed at the given project directory. */
-function mockPluginInput(directory: string): PluginInput {
-  return {
-    client: {
-      session: {
-        create: async () => ({ data: { id: 'mock-side-session' } }),
-        prompt: async () => ({ data: { info: {}, parts: [] } }),
-        promptAsync: async () => ({}),
-        abort: async () => ({}),
-        delete: async () => ({}),
-      },
-      // FR-052/FR-058: the hook layer logs through /log and derives the
-      // auditor model from the OpenCode config — the mock provides both.
-      app: { log: async () => ({}) },
-      config: { get: async () => ({ data: { small_model: 'mock/derived-model' } }) },
-    },
-    directory,
-  } as unknown as PluginInput;
-}
-
-// recordingPluginInput now lives in ./mocks.ts (review round 2, CS-004).
+// recordingPluginInput and silentPluginInput now live in ./mocks.ts
+// (review rounds 2 and 4).
 
 /** Event-hook input shape, for casting deliberately undeclared event payloads. */
 type EventHookInput = Parameters<NonNullable<Hooks['event']>>[0];
@@ -658,7 +639,7 @@ test('directive files load from the project directory into the memo', async () =
   });
   try {
     await withCleanDirectivesEnv(async () => {
-      const hooks = await plugin.server(mockPluginInput(dir));
+      const hooks = await plugin.server(silentPluginInput(dir));
       sessionState.get('directives-load');
       const messages = await dispatchMemoTransform(hooks, 'directives-load');
       const memo = messageText(messages[1]);
@@ -678,7 +659,7 @@ test('a forbidden path blocks the tool call with the directive named', async () 
   });
   try {
     await withCleanDirectivesEnv(async () => {
-      const hooks = await plugin.server(mockPluginInput(dir));
+      const hooks = await plugin.server(silentPluginInput(dir));
       await assert.rejects(
         dispatchToolBefore(hooks, 'guard-session', 'bash', { command: 'cat secrets/token.ts' }),
         (error: unknown) => {
@@ -703,7 +684,7 @@ test('a forbidden pattern blocks the tool call case-insensitively', async () => 
   });
   try {
     await withCleanDirectivesEnv(async () => {
-      const hooks = await plugin.server(mockPluginInput(dir));
+      const hooks = await plugin.server(silentPluginInput(dir));
       await assert.rejects(
         dispatchToolBefore(hooks, 'pattern-session', 'bash', { command: 'git push --force origin main' }),
         /forbidden pattern 'git\\s\+push\\s\+--force'/
@@ -721,7 +702,7 @@ test('clean tool calls proceed while directives are configured', async () => {
   });
   try {
     await withCleanDirectivesEnv(async () => {
-      const hooks = await plugin.server(mockPluginInput(dir));
+      const hooks = await plugin.server(silentPluginInput(dir));
       await dispatchToolBefore(hooks, 'clean-session', 'bash', { command: 'bun test' });
       await hooks.dispose!();
     });
@@ -738,7 +719,7 @@ test('a trigger rule surfaces its directive in the memo after a matching call', 
   });
   try {
     await withCleanDirectivesEnv(async () => {
-      const hooks = await plugin.server(mockPluginInput(dir));
+      const hooks = await plugin.server(silentPluginInput(dir));
       sessionState.get('trigger-session');
 
       const before = await dispatchMemoTransform(hooks, 'trigger-session');
@@ -765,7 +746,7 @@ test('a blocked call still records its trigger', async () => {
   });
   try {
     await withCleanDirectivesEnv(async () => {
-      const hooks = await plugin.server(mockPluginInput(dir));
+      const hooks = await plugin.server(silentPluginInput(dir));
       sessionState.get('blocked-trigger-session');
       await assert.rejects(
         dispatchToolBefore(hooks, 'blocked-trigger-session', 'bash', { command: 'cat secrets/credentials.json' })
@@ -783,7 +764,7 @@ test('a blocked call still records its trigger', async () => {
 
 test('a project without directives keeps the 2.1.0 behavior', async () => {
   await withCleanDirectivesEnv(async () => {
-    const hooks = await plugin.server(mockPluginInput('/tmp/supervisor-test'));
+    const hooks = await plugin.server(silentPluginInput('/tmp/supervisor-test'));
     sessionState.get('baseline-session');
     sessionState.get('baseline-session').goal = 'a goal';
     const messages = await dispatchMemoTransform(hooks, 'baseline-session');
@@ -796,7 +777,7 @@ test('a project without directives keeps the 2.1.0 behavior', async () => {
 
 test('options.directives registers directives through the tuple channel', async () => {
   await withCleanDirectivesEnv(async () => {
-    const hooks = await plugin.server(mockPluginInput('/tmp/supervisor-test'), {
+    const hooks = await plugin.server(silentPluginInput('/tmp/supervisor-test'), {
       directives: [{ id: 'opt-directive', text: 'Prefer bun over node.', when: [{ tool: 'bash' }] }],
     });
     sessionState.get('options-session');
@@ -840,7 +821,7 @@ test('the event-hook audit prompt carries the directives advisory', async () => 
   try {
     await withCleanDirectivesEnv(async () => {
       const prompts: string[] = [];
-      const input = mockPluginInput(dir);
+      const input = silentPluginInput(dir);
       (input.client as { session: Record<string, unknown> }).session.prompt = async (
         request: unknown
       ) => {
@@ -879,7 +860,7 @@ test('a dotfile forbidPath blocks paths the extension allowlist cannot see', asy
   });
   try {
     await withCleanDirectivesEnv(async () => {
-      const hooks = await plugin.server(mockPluginInput(dir));
+      const hooks = await plugin.server(silentPluginInput(dir));
       await assert.rejects(
         dispatchToolBefore(hooks, 'dotenv-session', 'bash', { command: 'cat .env.local' }),
         (error: unknown) => {
@@ -902,7 +883,7 @@ test('a case-different path still matches a forbidden glob', async () => {
   });
   try {
     await withCleanDirectivesEnv(async () => {
-      const hooks = await plugin.server(mockPluginInput(dir));
+      const hooks = await plugin.server(silentPluginInput(dir));
       await assert.rejects(
         dispatchToolBefore(hooks, 'case-session', 'bash', { command: 'cat Secrets/token.ts' }),
         (error: unknown) => {

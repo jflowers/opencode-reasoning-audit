@@ -167,3 +167,137 @@ export function verifyToolIntent(
     reason: 'Tool parameters align with the verified reasoning trace.',
   };
 }
+
+/**
+ * Normalize a path token for protected-state matching (FR-061):
+ * backslashes fold to slashes, empty and `.` segments drop, `..`
+ * pops its parent — so traversal spellings like
+ * `.opencode/supervisor/../supervisor/config.json` collapse onto
+ * the protected path — and leading dots fold away, so the project
+ * spelling (`.opencode/supervisor`) and the global one
+ * (`~/.config/opencode/supervisor`) normalize identically (review
+ * round 3: an exact-segment needle had left the project tier dead
+ * code).
+ */
+export const normalizePathToken = (token: string): string => {
+  const segments: string[] = [];
+  for (const segment of token.replaceAll('\\', '/').split('/')) {
+    if (segment === '' || segment === '.') continue;
+    if (segment === '..') {
+      segments.pop();
+      continue;
+    }
+    const folded = segment.replace(/^\.+/, '').toLowerCase();
+    if (folded !== '') {
+      segments.push(folded);
+    }
+  }
+  return segments.join('/');
+};
+
+/**
+ * True when the normalized path contains `run` as a consecutive
+ * segment run (FR-061): `a/directives-backup/b` does not match an
+ * `opencode/supervisor/directives` run, but every path inside or
+ * equal to that directory does. A single-segment run is exact
+ * segment equality, so `stale-approvals.json` does not match
+ * `approvals.json` (review round 4).
+ */
+export const hasProtectedSegmentRun = (normalized: string, run: string): boolean => {
+  const needle = run.split('/');
+  const segments = normalized.split('/');
+  for (let i = 0; i + needle.length <= segments.length; i += 1) {
+    if (needle.every((segment, j) => segments[i + j] === segment)) {
+      return true;
+    }
+  }
+  return false;
+};
+
+/**
+ * Argument keys that carry document content rather than an
+ * operational target (FR-061). Values under these keys are data
+ * the agent is writing — a mention there is not a touch — so the
+ * non-bash path lens skips them. Every other key, including
+ * custom/MCP key names like `target`, IS scanned: coverage fails
+ * closed for unknown tools rather than narrowing to a known-key
+ * allowlist (review round 4: an operational-key allowlist had let
+ * a custom tool touch the approvals file unblocked).
+ */
+const CONTENT_ARG_KEYS = ['content', 'oldString', 'newString'];
+
+/**
+ * Protected-state check (FR-061): returns the block reason when
+ * the tool call touches engineer-authored supervisor state — the
+ * approvals file, either supervisor config file, the directives
+ * directory, or the supervisor state directory containing them —
+ * and null when the call is allowed. Two lenses pair so evasion
+ * spellings cannot slip past either. The path lens matches
+ * lexically normalized tokens (traversal collapses, leading dots
+ * fold away); for non-bash tools it scans every argument key
+ * except the content keys above, so write/edit content is data,
+ * never a touch, while custom key names stay covered. The raw
+ * lens scans only bash command strings, capped at 64 KiB before
+ * any transform — a command is an executable operation, so
+ * mentions there are actionable, and the cap bounds allocation;
+ * it catches slash-free spellings (`cd .opencode/supervisor &&
+ * cat config.json`) the path extractor cannot tokenize (each bash
+ * call is a fresh process, so a cd cannot persist across calls).
+ * Block reasons name the protected object for the engineer, never
+ * the spelling the agent used.
+ *
+ * @param toolName The tool being invoked.
+ * @param args The tool call arguments.
+ * @param argPaths Policy paths extracted from the full arguments
+ *   (used directly for bash; other tools are re-filtered here).
+ * @returns The block reason, or null when the call is allowed.
+ */
+export const checkProtectedState = (
+  toolName: string,
+  args: Record<string, unknown> | undefined,
+  argPaths: string[]
+): string | null => {
+  // Path lens: bash arguments are operational in full; other
+  // tools carry their operation in path-like keys while content
+  // keys hold data.
+  const guardArgPaths =
+    toolName === 'bash'
+      ? argPaths
+      : extractPolicyPaths(
+          Object.fromEntries(Object.entries(args ?? {}).filter(([key]) => !CONTENT_ARG_KEYS.includes(key)))
+        );
+  const normalizedArgPaths = guardArgPaths.map(normalizePathToken);
+  // Raw lens: the bash command string only, capped before
+  // lowercasing so the scan cannot multiply a huge payload.
+  const command = args?.command;
+  const rawCommandLower =
+    toolName === 'bash' && typeof command === 'string' ? command.slice(0, 65536).toLowerCase() : '';
+  if (
+    normalizedArgPaths.some((p) => hasProtectedSegmentRun(p, 'approvals.json')) ||
+    // Review round 4: token-boundary matching — 'stale-approvals.json'
+    // contains the substring but names a different file.
+    /(?:^|[^a-z0-9_.-])approvals\.json/.test(rawCommandLower)
+  ) {
+    return 'the approvals file is engineer-authored state; the supervised agent may not touch it (engineer approval gates depend on it). Ask the engineer to update .opencode/supervisor/approvals.json.';
+  }
+  if (
+    normalizedArgPaths.some((p) => hasProtectedSegmentRun(p, 'opencode/supervisor/config.json')) ||
+    (rawCommandLower.includes('supervisor') && rawCommandLower.includes('config.json'))
+  ) {
+    return 'the supervisor config file is engineer-authored state; the supervised agent may not touch it (tool-guard toggles and the auditor model depend on it). Ask the engineer to edit the supervisor config.json directly.';
+  }
+  if (
+    normalizedArgPaths.some((p) => hasProtectedSegmentRun(p, 'opencode/supervisor/directives')) ||
+    (rawCommandLower.includes('supervisor') && rawCommandLower.includes('directives'))
+  ) {
+    return 'the supervisor directives are engineer-authored state; the supervised agent may not touch them (enforcement rules and gates depend on them). Ask the engineer to edit the directives directory directly.';
+  }
+  // Directory backstop (path lens only): an ancestor spelling
+  // (`rm -rf .opencode/supervisor`) normalizes onto the run
+  // itself. No raw pairing — the bare word 'supervisor' is too
+  // common in command prose (documented residual in FR-061).
+  if (normalizedArgPaths.some((p) => hasProtectedSegmentRun(p, 'opencode/supervisor'))) {
+    return 'the supervisor state directory is engineer-authored state; the supervised agent may not touch it (engineer directives, gates, and configuration depend on it). Ask the engineer to edit the .opencode/supervisor directory directly.';
+  }
+  return null;
+};

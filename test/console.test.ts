@@ -20,6 +20,7 @@ import {
   type AgentReport,
 } from '../src/console.ts';
 import { buildMemo } from '../src/memo.ts';
+import { silentPluginInput } from './mocks.ts';
 
 /** A stored report with a fixed timestamp — the module never touches the clock. */
 function report(kind: AgentReport['kind'], text: string): AgentReport {
@@ -29,26 +30,6 @@ function report(kind: AgentReport['kind'], text: string): AgentReport {
 /** Minimal ToolContext: the tools only read `sessionID`. */
 function toolContext(sessionID: string): ToolContext {
   return { sessionID } as unknown as ToolContext;
-}
-
-/** A representative plugin input (same shape as reminders.test.ts). */
-function mockPluginInput(): PluginInput {
-  return {
-    client: {
-      session: {
-        create: async () => ({ data: { id: 'mock-side-session' } }),
-        prompt: async () => ({ data: { info: {}, parts: [] } }),
-        promptAsync: async () => ({}),
-        abort: async () => ({}),
-        delete: async () => ({}),
-      },
-      // FR-052/FR-058: the hook layer logs through /log and derives the
-      // auditor model from the OpenCode config — the mock provides both.
-      app: { log: async () => ({}) },
-      config: { get: async () => ({ data: { small_model: 'mock/derived-model' } }) },
-    },
-    directory: '/tmp/supervisor-test',
-  } as unknown as PluginInput;
 }
 
 /** Event-hook input shape, for casting deliberately undeclared event payloads. */
@@ -321,7 +302,7 @@ test('buildMemo bounds the Agent reports section by maxReports', () => {
 
 test('report stores a report and echoes it back', async () => {
   await withCleanConsoleEnv(async () => {
-    const hooks = await plugin.server(mockPluginInput());
+    const hooks = await plugin.server(silentPluginInput());
     const result = await hooks.tool!.report.execute(
       { kind: 'blocker', text: '  the auth service is down  ' },
       toolContext('console-report-basic')
@@ -342,7 +323,7 @@ test('report stores a report and echoes it back', async () => {
 
 test('report rejects an unknown kind without storing anything', async () => {
   await withCleanConsoleEnv(async () => {
-    const hooks = await plugin.server(mockPluginInput());
+    const hooks = await plugin.server(silentPluginInput());
     const result = await hooks.tool!.report.execute(
       { kind: 'incident', text: 'something happened' },
       toolContext('console-report-kind')
@@ -354,7 +335,7 @@ test('report rejects an unknown kind without storing anything', async () => {
 
 test('report rejects whitespace-only text without creating session state', async () => {
   await withCleanConsoleEnv(async () => {
-    const hooks = await plugin.server(mockPluginInput());
+    const hooks = await plugin.server(silentPluginInput());
     const result = await hooks.tool!.report.execute(
       { kind: 'note', text: '   ' },
       toolContext('console-report-empty')
@@ -366,7 +347,7 @@ test('report rejects whitespace-only text without creating session state', async
 
 test('report truncates over-length text and notes it in the result', async () => {
   await withCleanConsoleEnv(async () => {
-    const hooks = await plugin.server(mockPluginInput());
+    const hooks = await plugin.server(silentPluginInput());
     const result = await hooks.tool!.report.execute(
       { kind: 'note', text: 'a'.repeat(2500) },
       toolContext('console-report-truncate')
@@ -380,7 +361,7 @@ test('report truncates over-length text and notes it in the result', async () =>
 test('report bounds stored reports to the configured maxReports', async () => {
   await withCleanConsoleEnv(async () => {
     process.env.OPENCODE_SUPERVISOR_MEMO_MAX_REPORTS = '2';
-    const hooks = await plugin.server(mockPluginInput());
+    const hooks = await plugin.server(silentPluginInput());
     const context = toolContext('console-report-bound');
     await hooks.tool!.report.execute({ kind: 'note', text: 'first' }, context);
     await hooks.tool!.report.execute({ kind: 'note', text: 'second' }, context);
@@ -402,7 +383,7 @@ test('report bounds stored reports to the configured maxReports', async () => {
 
 test('the memo transform injects stored reports as a memo message', async () => {
   await withCleanConsoleEnv(async () => {
-    const hooks = await plugin.server(mockPluginInput());
+    const hooks = await plugin.server(silentPluginInput());
     const sessionID = 'console-report-memo';
     await hooks.tool!.report.execute({ kind: 'deviation', text: 'skipped the flaky test' }, toolContext(sessionID));
     const messages = await dispatchMemoTransform(hooks, sessionID);
@@ -418,7 +399,7 @@ test('the memo transform injects stored reports as a memo message', async () => 
 
 test('recall returns the full retained solved items beyond the memo render cap', async () => {
   await withCleanConsoleEnv(async () => {
-    const hooks = await plugin.server(mockPluginInput());
+    const hooks = await plugin.server(silentPluginInput());
     const sessionID = 'console-recall-retention';
     for (const step of ['one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight']) {
       await dispatchToolAfter(hooks, sessionID, 'bash', { title: 't', output: `step ${step} done`, metadata: {} });
@@ -441,7 +422,7 @@ test('recall returns the full retained solved items beyond the memo render cap',
 
 test('recall lists the supported sections for an unknown what', async () => {
   await withCleanConsoleEnv(async () => {
-    const hooks = await plugin.server(mockPluginInput());
+    const hooks = await plugin.server(silentPluginInput());
     const result = await hooks.tool!.recall.execute({ what: 'tasks' }, toolContext('console-recall-unknown'));
     assert.equal(result, 'Unknown section "tasks" — supported values: goal, reminders, solved, critiques, all.');
   });
@@ -492,7 +473,7 @@ test('request_audit returns the critique in the result without steering on failu
 
 test('request_audit rejects a whitespace-only focus without consuming the bound', async () => {
   await withCleanConsoleEnv(async () => {
-    const hooks = await plugin.server(mockPluginInput());
+    const hooks = await plugin.server(silentPluginInput());
     const result = await hooks.tool!.request_audit.execute({ focus: '   ' }, toolContext('console-audit-empty'));
     assert.equal(result, 'Audit focus is empty after trimming — state the claim or step to check.');
     assert.equal(sessionState.peek('console-audit-empty'), undefined);
@@ -539,7 +520,7 @@ test('request_audit is bounded per session', async () => {
 test('failed on-demand critiques retain only the most recent CRITIQUE_RETENTION_CAP entries', async () => {
   await withCleanConsoleEnv(async () => {
     process.env.OPENCODE_SUPERVISOR_MAX_ON_DEMAND_AUDITS = '40';
-    const hooks = await plugin.server(mockPluginInput());
+    const hooks = await plugin.server(silentPluginInput());
     const context = toolContext('console-audit-retention');
     // 32 deterministic failures — no model calls, each appends the log.
     for (let i = 0; i < 32; i += 1) {
@@ -637,7 +618,7 @@ test('console tools return an inert result in auditor side sessions', async () =
 
 test('console tool bodies never throw on odd payloads', async () => {
   await withCleanConsoleEnv(async () => {
-    const hooks = await plugin.server(mockPluginInput());
+    const hooks = await plugin.server(silentPluginInput());
     const context = toolContext('console-odd-payloads');
     // Non-string kind falls to the unknown-kind listing; nothing stores.
     const oddKind = await hooks.tool!.report.execute({ kind: 42, text: 'hi' }, context);

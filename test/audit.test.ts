@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import type { Hooks, PluginInput } from '@opencode-ai/plugin';
 import plugin, { createInvokeModel, PLUGIN_VERSION, resolveHookConfig, sessionState } from '../index.ts';
-import { recordingPluginInput } from './mocks.ts';
+import { recordingPluginInput, silentPluginInput } from './mocks.ts';
 import { stripNarrative } from '../src/stripper.ts';
 import {
   resolveAuditorConfig,
@@ -324,32 +324,8 @@ test('verifyToolIntent counts a basename match as referenced', () => {
 
 // ── Hook layer (task 3.1): entry shape, config precedence, adapter ──
 
-// A representative plugin input for hook-shape and guard tests. The
-// event-hook audit tests below build recording clients via
-// auditHarness so they can assert the side-session calls; this mock's
-// prompt returns no text, so any audit it triggers fails open. The
-// partial client is cast once to the SDK shape (contained, review
-// finding #16) — only the members the hook layer touches are provided.
-function mockPluginInput(): PluginInput {
-  return {
-    client: {
-      session: {
-        create: async () => ({ data: { id: 'mock-side-session' } }),
-        prompt: async () => ({ data: { info: {}, parts: [] } }),
-        promptAsync: async () => ({}),
-        abort: async () => ({}),
-        delete: async () => ({}),
-      },
-      // FR-052/FR-058: the hook layer logs through /log and derives the
-      // auditor model from the OpenCode config — the mock provides both.
-      app: { log: async () => ({}) },
-      config: { get: async () => ({ data: { small_model: 'mock/derived-model' } }) },
-    },
-    directory: '/tmp/supervisor-test',
-  } as unknown as PluginInput;
-}
-
-// recordingPluginInput now lives in ./mocks.ts (review round 2, CS-004).
+// recordingPluginInput and silentPluginInput now live in ./mocks.ts
+// (review rounds 2 and 4).
 
 test('plugin module imports cleanly and exports the PluginModule entry', async () => {
   // The id matches the plugin-config key (review finding #5): a user
@@ -357,7 +333,7 @@ test('plugin module imports cleanly and exports the PluginModule entry', async (
   assert.equal(plugin.id, 'opencode-supervisor');
   assert.equal(typeof plugin.server, 'function');
 
-  const hooks = await plugin.server(mockPluginInput());
+  const hooks = await plugin.server(silentPluginInput());
   assert.equal(typeof hooks.event, 'function');
   assert.equal(typeof hooks['chat.message'], 'function');
   assert.equal(typeof hooks['tool.execute.before'], 'function');
@@ -630,7 +606,7 @@ test('createInvokeModel rejects on adapter failures so runPeerAudit fails open',
 });
 
 test('tool.execute.before blocks reward hacking (--no-verify)', async () => {
-  const hooks = await plugin.server(mockPluginInput());
+  const hooks = await plugin.server(silentPluginInput());
 
   await assert.rejects(
     hooks['tool.execute.before']!(
@@ -1305,7 +1281,7 @@ function messageText(message: unknown): string {
 }
 
 test('chat.message captures the first user message as the session goal', async () => {
-  const hooks = await plugin.server(mockPluginInput());
+  const hooks = await plugin.server(silentPluginInput());
   const sessionID = 'goal-session-first';
 
   await dispatchChatMessage(hooks, sessionID, {
@@ -1318,7 +1294,7 @@ test('chat.message captures the first user message as the session goal', async (
 });
 
 test('chat.message never replaces an already-captured goal', async () => {
-  const hooks = await plugin.server(mockPluginInput());
+  const hooks = await plugin.server(silentPluginInput());
   const sessionID = 'goal-session-sticky';
 
   await dispatchChatMessage(hooks, sessionID, {
@@ -1335,7 +1311,7 @@ test('chat.message never replaces an already-captured goal', async () => {
 });
 
 test('chat.message ignores assistant-role messages for goal capture', async () => {
-  const hooks = await plugin.server(mockPluginInput());
+  const hooks = await plugin.server(silentPluginInput());
   const sessionID = 'goal-session-assistant';
 
   await dispatchChatMessage(hooks, sessionID, {
@@ -1354,7 +1330,7 @@ test('chat.message ignores assistant-role messages for goal capture', async () =
 });
 
 test('chat.message ignores synthetic user parts for goal capture', async () => {
-  const hooks = await plugin.server(mockPluginInput());
+  const hooks = await plugin.server(silentPluginInput());
   const sessionID = 'goal-session-synthetic';
 
   // Synthetic parts (this plugin's own critiques, host injections)
@@ -1374,7 +1350,7 @@ test('chat.message ignores synthetic user parts for goal capture', async () => {
 });
 
 test('chat.message ignores whitespace-only user text for goal capture', async () => {
-  const hooks = await plugin.server(mockPluginInput());
+  const hooks = await plugin.server(silentPluginInput());
   const sessionID = 'goal-session-whitespace';
 
   await dispatchChatMessage(hooks, sessionID, {
@@ -1392,7 +1368,7 @@ test('chat.message ignores whitespace-only user text for goal capture', async ()
 
 test('tool.execute.after appends solved items with truncated, single-line outcomes', async () => {
   await withCleanAuditEnv(async () => {
-    const hooks = await plugin.server(mockPluginInput());
+    const hooks = await plugin.server(silentPluginInput());
     const sessionID = 'solved-session-shape';
 
     await dispatchToolAfter(hooks, sessionID, 'bash', { title: 't', output: 'x'.repeat(200), metadata: {} });
@@ -1417,7 +1393,7 @@ test('tool.execute.after appends solved items with truncated, single-line outcom
 
 test('tool.execute.after derives megabyte-scale outcomes with the same bounded shape', async () => {
   await withCleanAuditEnv(async () => {
-    const hooks = await plugin.server(mockPluginInput());
+    const hooks = await plugin.server(silentPluginInput());
     const sessionID = 'solved-session-huge';
 
     // A megabyte-scale output must cost the same as a short one
@@ -1437,7 +1413,7 @@ test('tool.execute.after derives megabyte-scale outcomes with the same bounded s
 
 test('tool.execute.after accumulates solved items per session, isolated across sessions', async () => {
   await withCleanAuditEnv(async () => {
-    const hooks = await plugin.server(mockPluginInput());
+    const hooks = await plugin.server(silentPluginInput());
 
     await dispatchToolAfter(hooks, 'solved-session-a', 'bash', { title: 't', output: 'ran the suite', metadata: {} });
     await dispatchToolAfter(hooks, 'solved-session-a', 'edit', { title: 't', output: 'src/a.ts updated', metadata: {} });
@@ -1456,7 +1432,7 @@ test('tool.execute.after accumulates solved items per session, isolated across s
 test('tool.execute.after retains solved items beyond the memo render cap (design D3)', async () => {
   await withCleanAuditEnv(async () => {
     process.env.OPENCODE_SUPERVISOR_MEMO_MAX_SOLVED_ITEMS = '2';
-    const hooks = await plugin.server(mockPluginInput());
+    const hooks = await plugin.server(silentPluginInput());
     const sessionID = 'solved-session-bounded';
 
     for (const step of ['first', 'second', 'third']) {
@@ -1515,7 +1491,7 @@ test('critique delivery retains the critique log beyond the memo render cap (des
 
 test('messages transform appends the supervision memo as a user message', async () => {
   await withCleanAuditEnv(async () => {
-    const hooks = await plugin.server(mockPluginInput());
+    const hooks = await plugin.server(silentPluginInput());
     const sessionID = 'memo-session-full';
 
     // Populate through the real hooks: the goal via chat.message
@@ -1558,7 +1534,7 @@ test('messages transform appends the supervision memo as a user message', async 
 
 test('messages transform leaves the payload untouched when nothing is populated', async () => {
   await withCleanAuditEnv(async () => {
-    const hooks = await plugin.server(mockPluginInput());
+    const hooks = await plugin.server(silentPluginInput());
     const sessionID = 'memo-session-empty';
 
     // A known session with no goal, no solves, no critiques.
@@ -1573,7 +1549,7 @@ test('messages transform leaves the payload untouched when nothing is populated'
 
 test('messages transform degrades gracefully without a session or on odd payloads', async () => {
   await withCleanAuditEnv(async () => {
-    const hooks = await plugin.server(mockPluginInput());
+    const hooks = await plugin.server(silentPluginInput());
 
     // No sessionID derivable from the payload messages: nothing to
     // look up.
@@ -1594,7 +1570,7 @@ test('messages transform degrades gracefully without a session or on odd payload
 
 test('chat.message and tool.execute.after never reject on odd payloads', async () => {
   await withCleanAuditEnv(async () => {
-    const hooks = await plugin.server(mockPluginInput());
+    const hooks = await plugin.server(silentPluginInput());
 
     // Absent message/parts and non-array parts: no goal, no rejection.
     await assert.doesNotReject(() => dispatchChatMessage(hooks, 'odd-goal-session', {}));
@@ -1629,7 +1605,7 @@ function dispatchToolBefore(hooks: DispatchHooks, sessionID: string, tool: strin
 
 test('tool.execute.before proceeds for any file path when no verified trace exists', async () => {
   await withCleanAuditEnv(async () => {
-    const hooks = await plugin.server(mockPluginInput());
+    const hooks = await plugin.server(silentPluginInput());
     const sessionID = 'guard-empty-trace';
 
     // FR-011: no audited reasoning exists yet, so the file-path check
@@ -1646,7 +1622,7 @@ test('tool.execute.before proceeds for any file path when no verified trace exis
 
 test('tool.execute.before still blocks reward-hacking arguments with an empty trace', async () => {
   await withCleanAuditEnv(async () => {
-    const hooks = await plugin.server(mockPluginInput());
+    const hooks = await plugin.server(silentPluginInput());
     const sessionID = 'guard-empty-trace-hack';
 
     // FR-011's "only check active" clause, end to end: the trace is
@@ -1667,7 +1643,7 @@ test('tool.execute.before still blocks reward-hacking arguments with an empty tr
 
 test('tool.execute.before blocks an unreferenced path with an actionable reason', async () => {
   await withCleanAuditEnv(async () => {
-    const hooks = await plugin.server(mockPluginInput());
+    const hooks = await plugin.server(silentPluginInput());
     const sessionID = 'guard-unreferenced';
     sessionState.get(sessionID).verifiedSteps.push('Edit src/a.ts to export the helper.');
 
@@ -1689,7 +1665,7 @@ test('tool.execute.before blocks an unreferenced path with an actionable reason'
 
 test('tool.execute.before proceeds for referenced paths by full path or basename', async () => {
   await withCleanAuditEnv(async () => {
-    const hooks = await plugin.server(mockPluginInput());
+    const hooks = await plugin.server(silentPluginInput());
 
     // FR-010: full-path match — trace and arguments both name src/a.ts.
     const fullTrace = 'guard-referenced-full';
@@ -1713,7 +1689,7 @@ test('tool.execute.before proceeds for referenced paths by full path or basename
 
 test('tool.execute.before blocks every reward-hacking pattern with check and marker named', async () => {
   await withCleanAuditEnv(async () => {
-    const hooks = await plugin.server(mockPluginInput());
+    const hooks = await plugin.server(silentPluginInput());
     const sessionID = 'guard-hack-patterns';
     sessionState.get(sessionID).verifiedSteps.push('Edit src/a.ts to export the helper.');
 
@@ -1845,7 +1821,7 @@ test('tool.execute.before honors disabled guard checks via configuration', async
   // resolveHookConfig test above).
   await withCleanAuditEnv(async () => {
     process.env.OPENCODE_SUPERVISOR_BLOCK_REWARD_HACKING = 'false';
-    const hooks = await plugin.server(mockPluginInput());
+    const hooks = await plugin.server(silentPluginInput());
     const sessionID = 'guard-config-reward-off';
     sessionState.get(sessionID).verifiedSteps.push('Edit src/a.ts to export the helper.');
     await assert.doesNotReject(() =>
@@ -1856,7 +1832,7 @@ test('tool.execute.before honors disabled guard checks via configuration', async
   // File-path trace check disabled: an unreferenced path proceeds.
   await withCleanAuditEnv(async () => {
     process.env.OPENCODE_SUPERVISOR_REQUIRE_STEP_REFERENCE_IN_TOOLS = 'false';
-    const hooks = await plugin.server(mockPluginInput());
+    const hooks = await plugin.server(silentPluginInput());
     const sessionID = 'guard-config-trace-off';
     sessionState.get(sessionID).verifiedSteps.push('Edit src/a.ts to export the helper.');
     await assert.doesNotReject(() =>
@@ -1869,7 +1845,7 @@ test('tool.execute.before honors disabled guard checks via configuration', async
 });
 
 test('dispose clears all session state', async () => {
-  const hooks = await plugin.server(mockPluginInput());
+  const hooks = await plugin.server(silentPluginInput());
 
   await hooks.event!({
     event: {

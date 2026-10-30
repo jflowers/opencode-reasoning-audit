@@ -11,7 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type { Hooks, PluginInput, ToolContext } from '@opencode-ai/plugin';
 import plugin from '../index.ts';
-import { recordingPluginInput } from './mocks.ts';
+import { recordingPluginInput, silentPluginInput } from './mocks.ts';
 import {
   approvalMatches,
   compileGates,
@@ -23,6 +23,7 @@ import {
   type ApprovalRecord,
 } from '../src/gates.ts';
 import type { Directive } from '../src/directives.ts';
+import { checkProtectedState, hasProtectedSegmentRun, normalizePathToken } from '../src/tool-guard.ts';
 
 // ── Helpers (each test file is self-contained) ──
 
@@ -48,27 +49,8 @@ function writeApprovals(dir: string, content: string): void {
   fs.writeFileSync(path.join(dir, '.opencode', 'supervisor', 'approvals.json'), content);
 }
 
-/** A representative plugin input pointed at the given project directory. */
-function mockPluginInput(directory: string): PluginInput {
-  return {
-    client: {
-      session: {
-        create: async () => ({ data: { id: 'mock-side-session' } }),
-        prompt: async () => ({ data: { info: {}, parts: [] } }),
-        promptAsync: async () => ({}),
-        abort: async () => ({}),
-        delete: async () => ({}),
-      },
-      // FR-052/FR-058: the hook layer logs through /log and derives the
-      // auditor model from the OpenCode config — the mock provides both.
-      app: { log: async () => ({}) },
-      config: { get: async () => ({ data: { small_model: 'mock/derived-model' } }) },
-    },
-    directory,
-  } as unknown as PluginInput;
-}
-
-// recordingPluginInput now lives in ./mocks.ts (review round 2, CS-004).
+// recordingPluginInput and silentPluginInput now live in ./mocks.ts
+// (review rounds 2 and 4).
 
 /** Minimal ToolContext: the console tools only read `sessionID`. */
 function toolContext(sessionID: string): ToolContext {
@@ -425,7 +407,7 @@ test('an unapproved approve gate blocks the call with the gate key and instructi
       'gates.md': directiveFile('Deploys are gated.', { approve: [{ id: 'deploy', tool: 'bash' }] }),
     });
     try {
-      const hooks = await plugin.server(mockPluginInput(dir));
+      const hooks = await plugin.server(silentPluginInput(dir));
       await assert.rejects(
         dispatchToolBefore(hooks, 'gate-block-1', 'bash', { command: 'deploy.sh' }),
         (error: unknown) => {
@@ -475,7 +457,7 @@ test('removing the approval blocks the next call', async () => {
     });
     writeApprovals(dir, '[{"gate":"deploy"}]');
     try {
-      const hooks = await plugin.server(mockPluginInput(dir));
+      const hooks = await plugin.server(silentPluginInput(dir));
       await dispatchToolBefore(hooks, 'gate-revoke-1', 'bash', { command: 'deploy.sh' });
       writeApprovals(dir, '[]');
       await assert.rejects(
@@ -496,7 +478,7 @@ test('a malformed approvals file fails closed with the parse error', async () =>
     });
     writeApprovals(dir, '{nope');
     try {
-      const hooks = await plugin.server(mockPluginInput(dir));
+      const hooks = await plugin.server(silentPluginInput(dir));
       await assert.rejects(
         dispatchToolBefore(hooks, 'gate-malformed-1', 'bash', { command: 'deploy.sh' }),
         (error: unknown) => {
@@ -520,7 +502,7 @@ test('an absent approvals file blocks with the instruction, not an error', async
       'gates.md': directiveFile('Deploys are gated.', { approve: [{ id: 'deploy', tool: 'bash' }] }),
     });
     try {
-      const hooks = await plugin.server(mockPluginInput(dir));
+      const hooks = await plugin.server(silentPluginInput(dir));
       await assert.rejects(
         dispatchToolBefore(hooks, 'gate-absent-1', 'bash', { command: 'deploy.sh' }),
         (error: unknown) => {
@@ -543,7 +525,7 @@ test('a review gate blocks a path without a trace reference', async () => {
       'review-gates.md': directiveFile('Billing changes need review.', { review: [{ path: 'src/billing/**' }] }),
     });
     try {
-      const hooks = await plugin.server(mockPluginInput(dir));
+      const hooks = await plugin.server(silentPluginInput(dir));
       await assert.rejects(
         dispatchToolBefore(hooks, 'gate-review-1', 'edit', { path: 'src/billing/invoice.ts' }),
         (error: unknown) => {
@@ -598,7 +580,7 @@ test('a call that matches no gate proceeds untouched', async () => {
       'gates.md': directiveFile('Deploys are gated.', { approve: [{ tool: 'bash' }] }),
     });
     try {
-      const hooks = await plugin.server(mockPluginInput(dir));
+      const hooks = await plugin.server(silentPluginInput(dir));
       await dispatchToolBefore(hooks, 'gate-pass-1', 'edit', { path: 'src/other/file.ts' });
       await hooks.dispose!();
     } finally {
@@ -615,7 +597,7 @@ test('an overlapping approve gate set blocks on the first unapproved gate', asyn
     });
     writeApprovals(dir, '[{"gate":"broad"}]');
     try {
-      const hooks = await plugin.server(mockPluginInput(dir));
+      const hooks = await plugin.server(silentPluginInput(dir));
       await assert.rejects(
         dispatchToolBefore(hooks, 'gate-multi-1', 'bash', { command: 'sh ops/deploy.sh' }),
         (error: unknown) => {
@@ -638,7 +620,7 @@ test('a review gate blocks a trailing-slash path on an empty trace', async () =>
       'review-gates.md': directiveFile('Billing changes need review.', { review: [{ path: 'src/billing/**' }] }),
     });
     try {
-      const hooks = await plugin.server(mockPluginInput(dir));
+      const hooks = await plugin.server(silentPluginInput(dir));
       await assert.rejects(
         dispatchToolBefore(hooks, 'gate-slash-1', 'bash', { command: 'rm -rf src/billing/' }),
         (error: unknown) => {
@@ -655,11 +637,72 @@ test('a review gate blocks a trailing-slash path on an empty trace', async () =>
   });
 });
 
+// ── checkProtectedState (pure, FR-061) ──
+
+test('normalizePathToken folds leading dots, separators, and traversal', () => {
+  assert.equal(
+    normalizePathToken('.opencode/supervisor/approvals.json'),
+    'opencode/supervisor/approvals.json'
+  );
+  assert.equal(
+    normalizePathToken('.opencode/supervisor/../supervisor/config.json'),
+    'opencode/supervisor/config.json'
+  );
+});
+
+test('hasProtectedSegmentRun matches consecutive segment runs only', () => {
+  assert.ok(
+    hasProtectedSegmentRun('a/opencode/supervisor/directives/file.md', 'opencode/supervisor/directives')
+  );
+  assert.ok(
+    !hasProtectedSegmentRun('opencode/supervisor/directives-backup/b', 'opencode/supervisor/directives')
+  );
+  assert.ok(hasProtectedSegmentRun('opencode/supervisor/approvals.json', 'approvals.json'));
+  assert.ok(!hasProtectedSegmentRun('stale-approvals.json', 'approvals.json'));
+});
+
+test('checkProtectedState blocks the approvals file for non-bash tools', () => {
+  const reason = checkProtectedState('read', { path: '.opencode/supervisor/approvals.json' }, []);
+  assert.ok(reason !== null, 'expected the approvals file to be blocked');
+  assert.ok(reason!.includes('approvals file'), reason!);
+});
+
+test('checkProtectedState blocklists write content rather than keys', () => {
+  // Review round 4: the 2.4.0 guard was key-agnostic; the round-3
+  // operational-key allowlist regressed custom/MCP keys. The
+  // CONTENT_ARG_KEYS blocklist restores coverage without scanning
+  // write content — a mention inside a file being written is data.
+  const reason = checkProtectedState('write', {
+    filePath: 'README.md',
+    content: 'see .opencode/supervisor/approvals.json for details',
+  }, []);
+  assert.equal(reason, null);
+});
+
+test('checkProtectedState catches slash-free bash spellings', () => {
+  const reason = checkProtectedState(
+    'bash',
+    { command: 'cd .opencode/supervisor && cat config.json' },
+    []
+  );
+  assert.ok(reason !== null, 'expected the config file to be blocked');
+  assert.ok(reason!.includes('supervisor config file'), reason!);
+});
+
+test('checkProtectedState allows lookalike approval filenames', () => {
+  // Review round 4: 'stale-approvals.json' contains the
+  // 'approvals.json' substring but names a different file — the
+  // path lens matches whole segments and the raw lens matches
+  // token boundaries, so neither fires.
+  assert.equal(checkProtectedState('read', { path: 'stale-approvals.json' }, []), null);
+  assert.equal(checkProtectedState('bash', { command: 'cat stale-approvals.json' }, []), null);
+});
+
 test('the agent cannot touch the approvals file', async () => {
   await withCleanGatesEnv(async () => {
     const dir = makeDirectiveDir({});
     try {
-      const hooks = await plugin.server(mockPluginInput(dir));
+      const hooks = await plugin.server(silentPluginInput(dir));
       await assert.rejects(
         dispatchToolBefore(hooks, 'gate-self-1', 'bash', {
           command: 'cat .opencode/supervisor/approvals.json',
@@ -682,7 +725,7 @@ test('the agent cannot touch the supervisor config file', async () => {
   await withCleanGatesEnv(async () => {
     const dir = makeDirectiveDir({});
     try {
-      const hooks = await plugin.server(mockPluginInput(dir));
+      const hooks = await plugin.server(silentPluginInput(dir));
       await assert.rejects(
         dispatchToolBefore(hooks, 'gate-self-2', 'bash', {
           command: 'cat .opencode/supervisor/config.json',
@@ -705,7 +748,7 @@ test('traversal spellings of the supervisor config file are still blocked (FR-06
   await withCleanGatesEnv(async () => {
     const dir = makeDirectiveDir({});
     try {
-      const hooks = await plugin.server(mockPluginInput(dir));
+      const hooks = await plugin.server(silentPluginInput(dir));
       await assert.rejects(
         dispatchToolBefore(hooks, 'gate-self-3', 'bash', {
           command: 'cat .opencode/supervisor/../supervisor/config.json',
@@ -728,7 +771,7 @@ test('slash-free cd spellings of the supervisor config file are still blocked (F
   await withCleanGatesEnv(async () => {
     const dir = makeDirectiveDir({});
     try {
-      const hooks = await plugin.server(mockPluginInput(dir));
+      const hooks = await plugin.server(silentPluginInput(dir));
       await assert.rejects(
         dispatchToolBefore(hooks, 'gate-self-4', 'bash', {
           // The path extractor tokenizes `cd .opencode/supervisor`
@@ -754,7 +797,7 @@ test('the agent cannot touch the supervisor directives directory (FR-061)', asyn
   await withCleanGatesEnv(async () => {
     const dir = makeDirectiveDir({});
     try {
-      const hooks = await plugin.server(mockPluginInput(dir));
+      const hooks = await plugin.server(silentPluginInput(dir));
       await assert.rejects(
         dispatchToolBefore(hooks, 'gate-self-5', 'bash', {
           command: 'rm .opencode/supervisor/directives/no-forbid.md',
@@ -777,7 +820,7 @@ test('the agent cannot delete the supervisor state directory (FR-061)', async ()
   await withCleanGatesEnv(async () => {
     const dir = makeDirectiveDir({});
     try {
-      const hooks = await plugin.server(mockPluginInput(dir));
+      const hooks = await plugin.server(silentPluginInput(dir));
       await assert.rejects(
         dispatchToolBefore(hooks, 'gate-self-6', 'bash', {
           command: 'rm -rf .opencode/supervisor',
@@ -800,7 +843,7 @@ test('write-tool content that mentions protected state is not blocked (FR-061)',
   await withCleanGatesEnv(async () => {
     const dir = makeDirectiveDir({});
     try {
-      const hooks = await plugin.server(mockPluginInput(dir));
+      const hooks = await plugin.server(silentPluginInput(dir));
       // Mentioning the protected path inside a document edit is not
       // touching it: the raw lens reads only bash commands, and the
       // path lens reads only operational argument keys — the write
@@ -818,6 +861,54 @@ test('write-tool content that mentions protected state is not blocked (FR-061)',
   });
 });
 
+test('custom tool keys cannot touch the approvals file (FR-061)', async () => {
+  await withCleanGatesEnv(async () => {
+    const dir = makeDirectiveDir({});
+    try {
+      const hooks = await plugin.server(silentPluginInput(dir));
+      // Review round 4: the 2.4.0 guard matched any argument key; the
+      // round-3 operational-key allowlist let custom/MCP keys like
+      // `target` through. The CONTENT_ARG_KEYS blocklist restores
+      // key-agnostic coverage without scanning write content.
+      await assert.rejects(
+        dispatchToolBefore(hooks, 'gate-self-8', 'mcp-file-read', {
+          target: '.opencode/supervisor/approvals.json',
+        }),
+        (error: unknown) => {
+          const message = error instanceof Error ? error.message : String(error);
+          assert.ok(message.includes('engineer-authored state'), message);
+          assert.ok(message.includes('approvals.json'), message);
+          return true;
+        }
+      );
+      await hooks.dispose!();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+test('lookalike approval filenames are not blocked (FR-061)', async () => {
+  await withCleanGatesEnv(async () => {
+    const dir = makeDirectiveDir({});
+    try {
+      const hooks = await plugin.server(silentPluginInput(dir));
+      // Review round 4: 'stale-approvals.json' contains the
+      // 'approvals.json' substring but names a different file — the
+      // path lens matches whole segments and the raw lens matches
+      // token boundaries, so neither fires.
+      await assert.doesNotReject(() =>
+        dispatchToolBefore(hooks, 'gate-self-9', 'bash', {
+          command: 'cat stale-approvals.json',
+        })
+      );
+      await hooks.dispose!();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 test('an oversized approvals file fails closed', async () => {
   await withCleanGatesEnv(async () => {
     const dir = makeDirectiveDir({
@@ -825,7 +916,7 @@ test('an oversized approvals file fails closed', async () => {
     });
     writeApprovals(dir, '[' + '"x",'.repeat(40000) + '"x"]');
     try {
-      const hooks = await plugin.server(mockPluginInput(dir));
+      const hooks = await plugin.server(silentPluginInput(dir));
       await assert.rejects(
         dispatchToolBefore(hooks, 'gate-oversize-1', 'bash', { command: 'deploy.sh' }),
         (error: unknown) => {
