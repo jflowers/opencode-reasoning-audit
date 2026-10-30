@@ -58,9 +58,41 @@ function mockPluginInput(directory: string): PluginInput {
         abort: async () => ({}),
         delete: async () => ({}),
       },
+      // FR-043/FR-049: the hook layer logs through /log and derives the
+      // auditor model from the OpenCode config — the mock provides both.
+      app: { log: async () => ({}) },
+      config: { get: async () => ({ data: { small_model: 'mock/derived-model' } }) },
     },
     directory,
   } as unknown as PluginInput;
+}
+
+/** A plugin input whose app.log records entries, for log-routing tests (FR-043). */
+function recordingPluginInput(
+  directory: string
+): { input: PluginInput; logEntries: Array<{ level: string; message: string }> } {
+  const logEntries: Array<{ level: string; message: string }> = [];
+  const input = {
+    client: {
+      session: {
+        create: async () => ({ data: { id: 'mock-side-session' } }),
+        prompt: async () => ({ data: { info: {}, parts: [] } }),
+        promptAsync: async () => ({}),
+        abort: async () => ({}),
+        delete: async () => ({}),
+      },
+      app: {
+        log: async (options: unknown) => {
+          const body = (options as { body?: { level?: string; message?: string } }).body;
+          logEntries.push({ level: body?.level ?? '', message: body?.message ?? '' });
+          return {};
+        },
+      },
+      config: { get: async () => ({ data: { small_model: 'mock/derived-model' } }) },
+    },
+    directory,
+  };
+  return { input: input as unknown as PluginInput, logEntries };
 }
 
 /** Minimal ToolContext: the console tools only read `sessionID`. */
@@ -143,6 +175,8 @@ function auditInput(response: string, directory: string): { input: PluginInput; 
           return {};
         },
       },
+      app: { log: async () => ({}) },
+      config: { get: async () => ({ data: { small_model: 'mock/derived-model' } }) },
     },
     directory,
   };
@@ -441,18 +475,19 @@ test('a recorded approval admits the gate and logs the grant once', async () => 
       'gates.md': directiveFile('Deploys are gated.', { approve: [{ id: 'deploy', tool: 'bash' }] }),
     });
     writeApprovals(dir, '[{"gate":"deploy","note":"ok"}]');
-    const logs: string[] = [];
-    const originalLog = console.log;
-    console.log = (...parts: unknown[]) => { logs.push(parts.join(' ')); };
+    const { input, logEntries } = recordingPluginInput(dir);
     try {
-      const hooks = await plugin.server(mockPluginInput(dir));
+      const hooks = await plugin.server(input);
       await dispatchToolBefore(hooks, 'gate-approve-1', 'bash', { command: 'deploy.sh' });
       await dispatchToolBefore(hooks, 'gate-approve-1', 'bash', { command: 'deploy.sh' });
-      const grants = logs.filter((line) => line.includes("gate 'deploy' of directive 'gates' approved for tool 'bash'"));
+      // FR-043: the grant rides the server log, once per gate key.
+      const grants = logEntries.filter(
+        (entry) =>
+          entry.level === 'info' && entry.message.includes("gate 'deploy' of directive 'gates' approved for tool 'bash'")
+      );
       assert.equal(grants.length, 1);
       await hooks.dispose!();
     } finally {
-      console.log = originalLog;
       fs.rmSync(dir, { recursive: true, force: true });
     }
   });

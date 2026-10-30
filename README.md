@@ -321,16 +321,33 @@ Settings resolve in order of precedence at runtime:
 
 1. **Environment variables** — the `OPENCODE_SUPERVISOR_*` names in
    the table below.
-2. **Defaults** — the `pluginConfig` object at the top of `index.ts`.
+2. **Project config file** — `<project>/.opencode/supervisor/config.json`
+   (any subset of the knobs below, as a JSON object).
+3. **Plugin options** — the `config` key of the plugin's tuple
+   registration in `opencode.json`.
+4. **Global config file** —
+   `${XDG_CONFIG_HOME:-~/.config}/opencode/supervisor/config.json`.
+5. **Derived model** (`auditorModel` only) — the host's `small_model`,
+   then `model`, read from the OpenCode config.
+6. **Defaults** — the `pluginConfig` object at the top of `index.ts`.
 
 > A session-plugin-config tier exists in the resolver, but no runtime
 > hook payload carries one (verified against `@opencode-ai/plugin`
-> 1.19.4) — configure through the environment.
+> 1.19.4) — configure through the environment or the config files.
+
+Config files accept any subset of the knobs below; unknown keys are
+ignored, and a malformed or wrong-typed file is skipped with one
+warning in the server log (fail-open, like directive loading). There
+is no default auditor model: with no tier setting one, the LLM audit
+tier is skipped entirely — deterministic invariants, the tool guard,
+and the memo remain active — and a warning names the state. The
+`auditorVariant` is optional; when unset, the side-session prompt
+omits it.
 
 | Knob | Environment variable | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `auditorModel` | `OPENCODE_SUPERVISOR_MODEL` | `google/gemini-3.8-flash` | The provider and model slug for the auditor side session. Format: `<provider>/<model-id>` (for example, `openai/o3-mini`, `anthropic/claude-3-7-sonnet`, or `google/gemini-3.8-flash`). |
-| `auditorVariant` | `OPENCODE_SUPERVISOR_VARIANT` | `low` | The reasoning effort passed to the auditor model. Allowed values: `minimal`, `low`, `medium`, `high`, `default`. |
+| `auditorModel` | `OPENCODE_SUPERVISOR_MODEL` | *(none — derived from the OpenCode `small_model`/`model`)* | The provider and model slug for the auditor side session. Format: `<provider>/<model-id>` (for example, `openai/o3-mini` or `anthropic/claude-3-7-sonnet`). |
+| `auditorVariant` | `OPENCODE_SUPERVISOR_VARIANT` | *(unset — omitted)* | The reasoning effort passed to the auditor model. Allowed values: `minimal`, `low`, `medium`, `high`, `default`. Omitted from the side-session prompt when unset. |
 | `maxRegenerations` | `OPENCODE_SUPERVISOR_MAX_REGENERATIONS` | `2` | The maximum number of interventions per session — delivered critiques and severe interrupts share this bound. Past the bound, critiques (severe included) are recorded without delivery or interrupt. |
 | `stripMode` | `OPENCODE_SUPERVISOR_STRIP_MODE` | `code_and_math` | Controls how `stripNarrative()` filters the Chain-of-Thought before the audit. See Section 7.1 below. |
 | `blockRewardHacking` | `OPENCODE_SUPERVISOR_BLOCK_REWARD_HACKING` | `true` | When `true`, the tool guard blocks tool calls that contain `--no-verify`, `.skip(`, `expect(true).toBe(true)`, or test deletion commands. |
@@ -349,6 +366,13 @@ Environment variable values: booleans accept exactly `true` or
 `false`; numbers must be non-negative; `stripMode` must be one of the
 three mode names. Invalid values fall through to the next precedence
 tier.
+
+All plugin diagnostics go to the OpenCode server log (service tag
+`opencode-supervisor`) through the `/log` endpoint — never to
+stdout/stderr, so `[supervisor]` lines cannot corrupt the TUI.
+Delivery is fire-and-forget (a server listener that is not up yet
+absorbs the loss), repeated warn/error entries dedupe per message,
+and the identity line logs once at the first hook invocation.
 
 ### 7.1 Understanding `stripMode`
 

@@ -19,7 +19,7 @@ bun install
 bun test
 
 # Test (Node 22+)
-node --test test/audit.test.ts test/memo.test.ts test/reminders.test.ts test/directives.test.ts test/console.test.ts test/gates.test.ts
+node --test test/audit.test.ts test/memo.test.ts test/reminders.test.ts test/directives.test.ts test/console.test.ts test/gates.test.ts test/plugin-log.test.ts test/config-file.test.ts
 
 # Register the plugin with OpenCode (local development)
 # Either add "./index.ts" to the "plugin" array in opencode.json, or:
@@ -43,7 +43,9 @@ opencode-supervisor/
 │   ├── console.ts         # Agent-console second slice: report records, recall views, retention constants
 │   ├── directives.ts      # Engineer directives: parsing, rule compilation, matching, rendering
 │   ├── gates.ts           # Engineer-console gate rules: approve/review compilation, approvals parsing, expiry matching
-│   └── tool-guard.ts      # Tool intent verification, engineer-directive enforcement, reward-hacking blocks
+│   ├── tool-guard.ts      # Tool intent verification, engineer-directive enforcement, reward-hacking blocks
+│   ├── plugin-log.ts      # Plugin logger: /log routing, fire-and-forget delivery, warn/error dedupe
+│   └── config-file.ts     # Supervisor config-file validation (project + global JSON tiers)
 ├── test/
 │   ├── audit.test.ts      # Auditor, tool-guard, and hook-layer tests (node:test, Bun and Node)
 │   ├── memo.test.ts       # Memo builder tests (node:test, Bun and Node)
@@ -192,6 +194,6 @@ before writing or reviewing code.
 - **Supervisor memo**: `buildMemo` (`src/memo.ts`) formats the goal, active engineer directives, reminders, recently solved items, agent reports, and recent critiques into a bounded memo delivered as one trailing user message per user prompt via `experimental.chat.messages.transform` (the earlier `experimental.chat.system.transform` delivery was discarded by the OpenCode 1.19.0 build); registration degrades gracefully when the hook is absent.
 - **Agent console**: the plugin registers five tools (`Hooks.tool`): `remind_me` / `forget_reminder` (`src/reminders.ts`) for durable reminders, and `recall` / `report` / `request_audit` (`src/console.ts`) for full-state recall beyond the memo caps, self-reported events, and on-demand peer audits of a stated focus (passed focus joins the verified trace; failed audits return the critique without steer/interrupt, bounded per session); tool results echo stored text (surviving gateway memo drops), side sessions get inert results, bodies fail open, and report text never enters audit prompts.
 - **Engineer console**: `server(input, options)` loads directives from `.opencode/supervisor/directives/*.md` (advisory markdown plus a fenced `supervisor` JSON rules block) and `options.directives` (tuple registration); unconditioned directives ride the memo always, `when` rules surface them after matching tool calls, `enforce` rules block tool calls through the guard, `approve` rules hold calls for engineer approval (`src/gates.ts`, approvals read fresh per gated call, fail-closed verification), `review` rules hold calls until a passed peer audit references the path, and the peer audit treats directives as violation criteria.
-- **Config resolution**: `resolveHookConfig` / `resolveAuditorConfig` apply session → env → default precedence so users can override the auditor model without code changes.
+- **Config resolution**: `resolveHookConfig` / `resolveAuditorConfig` apply session → env → project config file → plugin options → global config file → derived host model (`auditorModel` only) → default precedence; there is no default auditor model — with none set, the LLM audit tier is skipped (deterministic invariants remain). All plugin diagnostics route through `client.app.log` (`src/plugin-log.ts`), never stdout/stderr.
 - **Session state**: module-level Maps keyed by session ID track the goal, verified steps, critique count, solved items, critique log, reminders, the reminder-id sequence, agent reports, the on-demand audit count, triggered directive ids, and granted gate keys; in-process only, cleared on dispose. Solved-items and critique-log storage is bounded by retention constants (deeper than the memo render caps, so recall reaches further).
 - **Dual distribution**: the audit technique ships as middleware (`index.ts`) or a standalone skill (`skills/reasoning-auditor/skill.md`); the middleware adds steer/interrupt critique delivery, the tool guard, the supervisor memo, the agent-console tools, and the engineer console, which the skill cannot do.

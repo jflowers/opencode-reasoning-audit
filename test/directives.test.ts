@@ -54,9 +54,41 @@ function mockPluginInput(directory: string): PluginInput {
         abort: async () => ({}),
         delete: async () => ({}),
       },
+      // FR-043/FR-049: the hook layer logs through /log and derives the
+      // auditor model from the OpenCode config — the mock provides both.
+      app: { log: async () => ({}) },
+      config: { get: async () => ({ data: { small_model: 'mock/derived-model' } }) },
     },
     directory,
   } as unknown as PluginInput;
+}
+
+/** A plugin input whose app.log records entries, for log-routing tests (FR-043). */
+function recordingPluginInput(
+  directory: string
+): { input: PluginInput; logEntries: Array<{ level: string; message: string }> } {
+  const logEntries: Array<{ level: string; message: string }> = [];
+  const input = {
+    client: {
+      session: {
+        create: async () => ({ data: { id: 'mock-side-session' } }),
+        prompt: async () => ({ data: { info: {}, parts: [] } }),
+        promptAsync: async () => ({}),
+        abort: async () => ({}),
+        delete: async () => ({}),
+      },
+      app: {
+        log: async (options: unknown) => {
+          const body = (options as { body?: { level?: string; message?: string } }).body;
+          logEntries.push({ level: body?.level ?? '', message: body?.message ?? '' });
+          return {};
+        },
+      },
+      config: { get: async () => ({ data: { small_model: 'mock/derived-model' } }) },
+    },
+    directory,
+  };
+  return { input: input as unknown as PluginInput, logEntries };
 }
 
 /** Event-hook input shape, for casting deliberately undeclared event payloads. */
@@ -607,7 +639,7 @@ test('buildMemo renders a directives-only memo', () => {
 // ── Auditor integration (FR-031) ──
 
 const AUDIT_CONFIG: AuditConfig = {
-  auditorModel: 'google/gemini-3.8-flash',
+  auditorModel: 'mock/auditor-model',
   auditorVariant: 'low',
   stripMode: 'code_and_math',
   maxRegenerations: 2,
@@ -809,22 +841,17 @@ test('the directive count bound drops the overflow with a warning', async () => 
   const dir = makeDirectiveDir(files);
   try {
     await withCleanDirectivesEnv(async () => {
-      const warnings: string[] = [];
-      const originalWarn = console.warn;
-      console.warn = (message: string) => warnings.push(message);
-      try {
-        const hooks = await plugin.server(mockPluginInput(dir));
-        sessionState.get('cap-session');
-        const messages = await dispatchMemoTransform(hooks, 'cap-session');
-        assert.equal(messages.length, 2);
-        const memo = messageText(messages[1]);
-        assert.ok(memo.includes('- d20: policy 20'));
-        assert.ok(!memo.includes('d21'));
-        await hooks.dispose!();
-      } finally {
-        console.warn = originalWarn;
-      }
-      assert.ok(warnings.some((w) => w.includes('beyond the cap')));
+      const { input, logEntries } = recordingPluginInput(dir);
+      const hooks = await plugin.server(input);
+      sessionState.get('cap-session');
+      const messages = await dispatchMemoTransform(hooks, 'cap-session');
+      assert.equal(messages.length, 2);
+      const memo = messageText(messages[1]);
+      assert.ok(memo.includes('- d20: policy 20'));
+      assert.ok(!memo.includes('d21'));
+      await hooks.dispose!();
+      // FR-043: the overflow warning rides the server log, not stderr.
+      assert.ok(logEntries.some((entry) => entry.level === 'warn' && entry.message.includes('beyond the cap')));
     });
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
@@ -926,20 +953,16 @@ test('an unreadable directive file is skipped while the rest still load', async 
   fs.chmodSync(locked, 0o000);
   try {
     await withCleanDirectivesEnv(async () => {
-      const warnings: string[] = [];
-      const originalWarn = console.warn;
-      console.warn = (message: string) => warnings.push(message);
-      try {
-        const hooks = await plugin.server(mockPluginInput(dir));
-        sessionState.get('unreadable-session');
-        const messages = await dispatchMemoTransform(hooks, 'unreadable-session');
-        assert.equal(messages.length, 2);
-        assert.ok(messageText(messages[1]).includes('- good:'));
-        await hooks.dispose!();
-      } finally {
-        console.warn = originalWarn;
-      }
-      assert.ok(warnings.some((w) => w.includes("directive file 'locked.md' unreadable")));
+      const { input, logEntries } = recordingPluginInput(dir);
+      const hooks = await plugin.server(input);
+      sessionState.get('unreadable-session');
+      const messages = await dispatchMemoTransform(hooks, 'unreadable-session');
+      assert.equal(messages.length, 2);
+      assert.ok(messageText(messages[1]).includes('- good:'));
+      await hooks.dispose!();
+      assert.ok(
+        logEntries.some((entry) => entry.level === 'warn' && entry.message.includes("directive file 'locked.md' unreadable"))
+      );
     });
   } finally {
     fs.chmodSync(locked, 0o644);
@@ -955,19 +978,16 @@ test('the first-recorded trigger for a directive is logged once', async () => {
   });
   try {
     await withCleanDirectivesEnv(async () => {
-      const logs: string[] = [];
-      const originalLog = console.log;
-      console.log = (...parts: unknown[]) => logs.push(parts.join(' '));
-      try {
-        const hooks = await plugin.server(mockPluginInput(dir));
-        sessionState.get('trigger-log-session');
-        await dispatchToolBefore(hooks, 'trigger-log-session', 'edit', { path: 'src/legacy/queue.ts' });
-        await dispatchToolBefore(hooks, 'trigger-log-session', 'edit', { path: 'src/legacy/other.ts' });
-        await hooks.dispose!();
-      } finally {
-        console.log = originalLog;
-      }
-      const hits = logs.filter((l) => l.includes("directive 'legacy-note' triggered by tool 'edit'"));
+      const { input, logEntries } = recordingPluginInput(dir);
+      const hooks = await plugin.server(input);
+      sessionState.get('trigger-log-session');
+      await dispatchToolBefore(hooks, 'trigger-log-session', 'edit', { path: 'src/legacy/queue.ts' });
+      await dispatchToolBefore(hooks, 'trigger-log-session', 'edit', { path: 'src/legacy/other.ts' });
+      await hooks.dispose!();
+      // FR-043: the trigger observation rides the server log, not stdout.
+      const hits = logEntries.filter(
+        (entry) => entry.level === 'info' && entry.message.includes("directive 'legacy-note' triggered by tool 'edit'")
+      );
       assert.equal(hits.length, 1);
     });
   } finally {

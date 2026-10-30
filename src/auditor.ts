@@ -15,10 +15,16 @@ export type AuditorVariant = 'minimal' | 'low' | 'medium' | 'high' | 'default';
 export type AuditSeverity = 'minor' | 'severe';
 
 export interface AuditConfig {
-  /** Provider + model slug, e.g. 'openai/o3-mini', 'anthropic/claude-3-7-sonnet', 'google/gemini-3.8-flash' */
-  auditorModel: string;
-  /** Reasoning effort / thinking variant passed to OpenCode provider */
-  auditorVariant: AuditorVariant;
+  /**
+   * Provider + model slug, e.g. 'openai/o3-mini' or
+   * 'enmaas/rits/deepseek-ai/DeepSeek-V4.1-Flash-1017'. Optional since
+   * FR-050: no slug is hardcoded — resolution (environment, config
+   * files, plugin options, derived fallback) lives in index.ts, and
+   * an unresolved model skips the LLM tier (FR-051).
+   */
+  auditorModel?: string;
+  /** Reasoning effort / thinking variant passed to OpenCode provider; omitted when unset. */
+  auditorVariant?: AuditorVariant;
   stripMode: 'code_and_math' | 'balanced' | 'strict';
   maxRegenerations: number;
   blockRewardHacking: boolean;
@@ -238,6 +244,15 @@ export async function runPeerAudit(
   const localFailure = checkDeterministicInvariants(steps);
   if (localFailure) {
     return localFailure;
+  }
+
+  // FR-051: with no auditor model resolved, skip the LLM tier entirely —
+  // deterministic invariants above remain the whole audit.
+  if (config.auditorModel === undefined) {
+    return {
+      passed: true,
+      critique: 'No auditor model configured; deterministic invariants only.',
+    };
   }
 
   // Goal-aware audit prompt (FR-004): instructions, the session goal when

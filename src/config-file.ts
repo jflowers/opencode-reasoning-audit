@@ -1,0 +1,198 @@
+/**
+ * Supervisor config-file parsing (FR-047, FR-048): pure validation
+ * for the optional JSON config files that tune the supervisor —
+ * project `<dir>/.opencode/supervisor/config.json` and global
+ * `${XDG_CONFIG_HOME:-~/.config}/opencode/supervisor/config.json`.
+ * A file may set any subset of the hook configuration; unknown keys
+ * are ignored; a value of the wrong type, or malformed JSON, rejects
+ * the whole file with an error string so the caller can skip the
+ * tier and warn once. File I/O lives in index.ts
+ * (`readSupervisorConfigFile`), mirroring the approvals reader;
+ * parsing and validation are pure here.
+ */
+
+import type { AuditorVariant } from './auditor.ts';
+import type { MemoLimits } from './memo.ts';
+import type { StripMode } from './stripper.ts';
+
+/**
+ * Read bound for supervisor config files, mirroring the approvals
+ * file bound (design D4): a planted oversized file is skipped with
+ * one warning instead of stalling the event loop.
+ */
+export const MAX_CONFIG_FILE_BYTES = 64 * 1024;
+
+/** The subset of hook configuration a supervisor config file may set. */
+export interface SupervisorFileConfig {
+  /** Auditor model as a full `<provider>/<model-id>` slug. */
+  auditorModel?: string;
+  /** Auditor variant from the documented vocabulary. */
+  auditorVariant?: AuditorVariant;
+  stripMode?: StripMode;
+  maxRegenerations?: number;
+  blockRewardHacking?: boolean;
+  requireStepReferenceInTools?: boolean;
+  memoLimits?: Partial<MemoLimits>;
+  maxOnDemandAudits?: number;
+}
+
+/** Parse outcome: the accepted subset, or an error when rejected. */
+export interface ParsedSupervisorConfig {
+  config: SupervisorFileConfig;
+  error: string | null;
+}
+
+const STRIP_MODES: readonly StripMode[] = ['code_and_math', 'balanced', 'strict'];
+
+const AUDITOR_VARIANTS: readonly AuditorVariant[] = [
+  'minimal',
+  'low',
+  'medium',
+  'high',
+  'default',
+];
+
+const MEMO_LIMIT_KEYS: readonly (keyof MemoLimits)[] = [
+  'maxSolvedItems',
+  'maxCritiques',
+  'maxReminders',
+  'maxReports',
+];
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
+const optionalString = (
+  owner: Record<string, unknown>,
+  key: string
+): { value?: string; error: string | null } => {
+  const raw = owner[key];
+  if (raw === undefined) return { error: null };
+  if (typeof raw !== 'string' || raw.trim() === '') {
+    return { error: `"${key}" must be a non-empty string` };
+  }
+  return { value: raw, error: null };
+};
+
+const optionalNumber = (
+  owner: Record<string, unknown>,
+  key: string
+): { value?: number; error: string | null } => {
+  const raw = owner[key];
+  if (raw === undefined) return { error: null };
+  if (typeof raw !== 'number' || !Number.isFinite(raw) || raw < 0) {
+    return { error: `"${key}" must be a non-negative finite number` };
+  }
+  return { value: raw, error: null };
+};
+
+const optionalBoolean = (
+  owner: Record<string, unknown>,
+  key: string
+): { value?: boolean; error: string | null } => {
+  const raw = owner[key];
+  if (raw === undefined) return { error: null };
+  if (typeof raw !== 'boolean') {
+    return { error: `"${key}" must be a boolean` };
+  }
+  return { value: raw, error: null };
+};
+
+/**
+ * Validates an untrusted config object (file content or plugin tuple
+ * options) into a `SupervisorFileConfig`. Unknown keys are ignored;
+ * any known key of the wrong type rejects the whole object.
+ */
+export const validateSupervisorConfig = (value: unknown): ParsedSupervisorConfig => {
+  if (!isRecord(value)) {
+    return { config: {}, error: 'configuration must be a JSON object' };
+  }
+  const config: SupervisorFileConfig = {};
+  const reject = (error: string): ParsedSupervisorConfig => ({ config: {}, error });
+
+  const model = optionalString(value, 'auditorModel');
+  if (model.error !== null) return reject(model.error);
+  if (model.value !== undefined) config.auditorModel = model.value;
+
+  const variantRaw = value.auditorVariant;
+  if (variantRaw !== undefined) {
+    if (
+      typeof variantRaw !== 'string' ||
+      !AUDITOR_VARIANTS.includes(variantRaw as AuditorVariant)
+    ) {
+      return reject(
+        `"auditorVariant" must be one of ${AUDITOR_VARIANTS.join(', ')}`
+      );
+    }
+    config.auditorVariant = variantRaw as AuditorVariant;
+  }
+
+  const stripModeRaw = value.stripMode;
+  if (stripModeRaw !== undefined) {
+    if (
+      typeof stripModeRaw !== 'string' ||
+      !STRIP_MODES.includes(stripModeRaw as StripMode)
+    ) {
+      return reject(`"stripMode" must be one of ${STRIP_MODES.join(', ')}`);
+    }
+    config.stripMode = stripModeRaw as StripMode;
+  }
+
+  const numeric: readonly (keyof SupervisorFileConfig)[] = [
+    'maxRegenerations',
+    'maxOnDemandAudits',
+  ];
+  for (const key of numeric) {
+    const parsed = optionalNumber(value, key);
+    if (parsed.error !== null) return reject(parsed.error);
+    if (parsed.value !== undefined) {
+      config[key] = parsed.value as never;
+    }
+  }
+
+  const booleanKeys: readonly (keyof SupervisorFileConfig)[] = [
+    'blockRewardHacking',
+    'requireStepReferenceInTools',
+  ];
+  for (const key of booleanKeys) {
+    const parsed = optionalBoolean(value, key);
+    if (parsed.error !== null) return reject(parsed.error);
+    if (parsed.value !== undefined) {
+      config[key] = parsed.value as never;
+    }
+  }
+
+  const memoLimitsRaw = value.memoLimits;
+  if (memoLimitsRaw !== undefined) {
+    if (!isRecord(memoLimitsRaw)) {
+      return reject('"memoLimits" must be an object');
+    }
+    const limits: Partial<MemoLimits> = {};
+    for (const key of MEMO_LIMIT_KEYS) {
+      const parsed = optionalNumber(memoLimitsRaw, key);
+      if (parsed.error !== null) {
+        return reject(`"memoLimits.${key}" must be a non-negative finite number`);
+      }
+      if (parsed.value !== undefined) {
+        limits[key] = parsed.value;
+      }
+    }
+    config.memoLimits = limits;
+  }
+
+  return { config, error: null };
+};
+
+/**
+ * Parses raw config-file text. Malformed JSON rejects with an error
+ * string; valid JSON is validated field by field.
+ */
+export const parseSupervisorConfigFile = (raw: string): ParsedSupervisorConfig => {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    return { config: {}, error: `invalid JSON: ${String(error)}` };
+  }
+  return validateSupervisorConfig(parsed);
+};
