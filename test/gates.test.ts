@@ -68,7 +68,6 @@ function mockPluginInput(directory: string): PluginInput {
   } as unknown as PluginInput;
 }
 
-/** A plugin input whose app.log records entries, for log-routing tests (FR-052). */
 // recordingPluginInput now lives in ./mocks.ts (review round 2, CS-004).
 
 /** Minimal ToolContext: the console tools only read `sessionID`. */
@@ -766,6 +765,51 @@ test('the agent cannot touch the supervisor directives directory (FR-061)', asyn
           assert.ok(message.includes('supervisor directives'), message);
           return true;
         }
+      );
+      await hooks.dispose!();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+test('the agent cannot delete the supervisor state directory (FR-061)', async () => {
+  await withCleanGatesEnv(async () => {
+    const dir = makeDirectiveDir({});
+    try {
+      const hooks = await plugin.server(mockPluginInput(dir));
+      await assert.rejects(
+        dispatchToolBefore(hooks, 'gate-self-6', 'bash', {
+          command: 'rm -rf .opencode/supervisor',
+        }),
+        (error: unknown) => {
+          const message = error instanceof Error ? error.message : String(error);
+          assert.ok(message.includes('engineer-authored state'), message);
+          assert.ok(message.includes('supervisor state directory'), message);
+          return true;
+        }
+      );
+      await hooks.dispose!();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+test('write-tool content that mentions protected state is not blocked (FR-061)', async () => {
+  await withCleanGatesEnv(async () => {
+    const dir = makeDirectiveDir({});
+    try {
+      const hooks = await plugin.server(mockPluginInput(dir));
+      // Mentioning the protected path inside a document edit is not
+      // touching it: the raw lens reads only bash commands, and the
+      // path lens reads only operational argument keys — the write
+      // payload's content is data, not an operation (review round 3).
+      await assert.doesNotReject(() =>
+        dispatchToolBefore(hooks, 'gate-self-7', 'write', {
+          filePath: 'README.md',
+          content: 'see .opencode/supervisor/config.json for details',
+        })
       );
       await hooks.dispose!();
     } finally {

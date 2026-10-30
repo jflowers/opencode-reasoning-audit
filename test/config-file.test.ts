@@ -318,6 +318,28 @@ test('a malformed project config file is skipped with one warning and lower tier
   }
 });
 
+test('a malformed auditorModel slug rejects the project config file with one warning', async () => {
+  const dir = makeConfigDir('{"auditorModel": "gemini-flash"}');
+  try {
+    await withCleanConfigEnv(async () => {
+      const harness = serverHarness(dir, { small_model: 'derived/slug-fallback' });
+      const hooks = await plugin.server(harness.input);
+      await dispatchPart(hooks, completedReasoningPart({ sessionID: 'config-slug-session' }));
+      assert.ok(
+        harness.logEntries.some(
+          (entry) =>
+            entry.level === 'warn' && entry.message.includes('"auditorModel" must be a provider/model slug')
+        )
+      );
+      // The file tier is rejected whole; the derived tier still applies.
+      assert.deepEqual(harness.titles, ['supervisor-audit @ derived/slug-fallback']);
+      await hooks.dispose!();
+    });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('the derived tier prefers small_model over model', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'supervisor-config-'));
   try {

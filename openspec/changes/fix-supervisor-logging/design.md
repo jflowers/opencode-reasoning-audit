@@ -149,12 +149,22 @@ title degrades to `supervisor-audit @ <model>`.
   same trust class as the environment tier. Review round 2 widened
   the net to match the trust class: the directives directory is
   protected the same way (its files carry the enforce/approve/
-  review rules), and the check is two-lens — lexically normalized
-  path tokens (traversal `..` collapses) paired with a raw-args
-  scan — so slash-free `cd`-spellings cannot slip past either
-  lens (FR-061). Residual: variable indirection (`cat $CFG`) is
-  not caught; accepted — the same residual class as any
-  path-based guard.
+review rules). Review round 4 resharpened both lenses after a
+bypass and a false-positive surface showed up: the path lens
+now folds leading dots (`.opencode` ≡ `opencode`, so the
+project tier matches — it had been dead code), protects the
+whole `opencode/supervisor` run (ancestor spellings like
+`rm -rf .opencode/supervisor` are blocked), and for non-bash
+tools reads only operational argument keys (`filePath`, `path`,
+`directory`, `pattern`) — write/edit content is data, never
+scanned. The raw lens is bash-only and capped at 64 KiB: a
+command string is an executable operation, so mentions there
+are actionable, and each bash call is a fresh process, so a
+cross-call `cd` cannot persist. Residuals: bash heredoc/echo
+prose can false-positive; custom tools with non-standard
+path-argument key names are not covered by the operational-key
+list; variable indirection (`cat $CFG`) is not caught;
+accepted — the same residual class as any path-based guard.
 - **Dedupe hides recurring distinct failures**: only identical
   level+message pairs collapse; new messages always surface.
 - **Test ripple**: hook tests currently capture `console.*`; they

@@ -82,7 +82,7 @@
   config-resolution bullet, `skills/reasoning-auditor/skill.md`
   model references, `src/auditor.ts` JSDoc (FR-059). Verify: no
   stale `google/gemini` references outside history entries.
-  Release follow-ups tracked in #30 (docs) and #31 (blog).
+  Release follow-ups tracked in #30 (docs), #31 (blog), and #4 (tutorial, scope extended).
 - [x] 5.3 End-to-end check in a real session: no `[supervisor]`
   lines in the terminal, `opencode-supervisor` entries appear in
   `~/.local/share/opencode/log/opencode.log`, and audit side

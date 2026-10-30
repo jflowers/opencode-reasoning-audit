@@ -110,9 +110,15 @@ export const validateSupervisorConfig = (value: unknown): ParsedSupervisorConfig
   const config: SupervisorFileConfig = {};
   const reject = (error: string): ParsedSupervisorConfig => ({ config: {}, error });
 
-  const model = optionalString(value, 'auditorModel');
-  if (model.error !== null) return reject(model.error);
-  if (model.value !== undefined) config.auditorModel = model.value;
+    const model = optionalString(value, 'auditorModel');
+    if (model.error !== null) return reject(model.error);
+    if (model.value !== undefined) config.auditorModel = model.value;
+    if (config.auditorModel !== undefined) {
+      const slash = config.auditorModel.indexOf('/');
+      if (slash <= 0 || slash === config.auditorModel.length - 1) {
+        return reject('"auditorModel" must be a provider/model slug (e.g. "provider/model")');
+      }
+    }
 
   const variantRaw = value.auditorVariant;
   if (variantRaw !== undefined) {
