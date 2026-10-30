@@ -355,6 +355,23 @@ test('the derived tier prefers small_model over model', async () => {
   }
 });
 
+test('an empty small_model falls back to model', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'supervisor-config-'));
+  try {
+    await withCleanConfigEnv(async () => {
+      // Review round 4: an empty-string small_model is not nullish —
+      // `??` coalescing kept the derived tier on a blank slug.
+      const harness = serverHarness(dir, { small_model: '', model: 'derived/model-fallback' });
+      const hooks = await plugin.server(harness.input);
+      await dispatchPart(hooks, completedReasoningPart({ sessionID: 'config-empty-small-model-session' }));
+      assert.deepEqual(harness.titles, ['supervisor-audit @ derived/model-fallback']);
+      await hooks.dispose!();
+    });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('a failed derived lookup is retried on the next resolution (FR-058)', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'supervisor-config-'));
   try {

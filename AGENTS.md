@@ -47,6 +47,7 @@ opencode-supervisor/
 │   ├── plugin-log.ts      # Plugin logger: /log routing, fire-and-forget delivery, warn/error dedupe
 │   └── config-file.ts     # Supervisor config-file validation (project + global JSON tiers)
 ├── test/
+│   ├── mocks.ts           # Shared hook-layer test mocks (recording and silent plugin inputs)
 │   ├── audit.test.ts      # Auditor, tool-guard, and hook-layer tests (node:test, Bun and Node)
 │   ├── memo.test.ts       # Memo builder tests (node:test, Bun and Node)
 │   ├── reminders.test.ts  # Reminder module, memo integration, and tool-layer tests (node:test, Bun and Node)

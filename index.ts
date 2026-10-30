@@ -39,7 +39,7 @@ import {
   type InvokeModel,
 } from './src/auditor.ts';
 import { stripNarrative } from './src/stripper.ts';
-import { verifyToolIntent, type ToolVerificationResult } from './src/tool-guard.ts';
+import { checkProtectedState, verifyToolIntent, type ToolVerificationResult } from './src/tool-guard.ts';
 import {
   buildMemo,
   DEFAULT_MEMO_LIMITS,
@@ -1090,54 +1090,8 @@ const readBoundedFile = (
   }
 };
 
-/**
- * Lexically normalize an extracted path token (FR-061): backslashes
- * fold to slashes, `.` and empty segments drop, `..` pops its parent,
- * leading dots fold away (`.opencode` ≡ `opencode` — review round 3:
- * the project and global supervisor spellings unify; an exact-segment
- * needle had left the project tier dead code), and matching folds to
- * lowercase. Traversal spellings
- * (`.opencode/supervisor/../supervisor/config.json`) collapse onto
- * the protected path so suffix matching cannot be dodged.
- */
-const normalizePathToken = (token: string): string => {
-  const segments: string[] = [];
-  for (const segment of token.replaceAll('\\', '/').split('/')) {
-    if (segment === '' || segment === '.') {
-      continue;
-    }
-    if (segment === '..') {
-      segments.pop();
-      continue;
-    }
-    // Review round 3: leading dots fold away, so the project spelling
-    // ('.opencode/supervisor') and the global one
-    // ('~/.config/opencode/supervisor') normalize identically — the
-    // protected-segment needles below are blind to neither tier.
-    const folded = segment.replace(/^\.+/, '').toLowerCase();
-    if (folded !== '') {
-      segments.push(folded);
-    }
-  }
-  return segments.join('/');
-};
-
-/**
- * True when the normalized path contains `run` as a consecutive
- * segment run (FR-061) — `a/directives-backup/b` does not match a
- * `opencode/supervisor/directives` run, but every path inside or
- * equal to that directory does.
- */
-const hasProtectedSegmentRun = (normalized: string, run: string): boolean => {
-  const needle = run.split('/');
-  const segments = normalized.split('/');
-  for (let i = 0; i + needle.length <= segments.length; i += 1) {
-    if (needle.every((segment, j) => segments[i + j] === segment)) {
-      return true;
-    }
-  }
-  return false;
-};
+// normalizePathToken and hasProtectedSegmentRun now live in
+// src/tool-guard.ts (review round 4) beside checkProtectedState.
 
 const readApprovals = (directory: string): { records: ApprovalRecord[]; error: string | null } => {
   const approvalsPath = path.join(directory, '.opencode', 'supervisor', 'approvals.json');
@@ -1179,9 +1133,13 @@ const readSupervisorConfigFile = (configPath: string): ParsedSupervisorConfig =>
  * @returns Absolute path to the global config file.
  */
 const globalSupervisorConfigPath = (): string => {
+  // Review round 4 (LOW): a relative XDG_CONFIG_HOME is ignored the
+  // same as an unset one — path.join would otherwise rebase the
+  // config path onto the plugin process's cwd.
+  const xdg = process.env.XDG_CONFIG_HOME;
   const configRoot =
-    process.env.XDG_CONFIG_HOME !== undefined && process.env.XDG_CONFIG_HOME.trim() !== ''
-      ? process.env.XDG_CONFIG_HOME
+    xdg !== undefined && xdg.trim() !== '' && path.isAbsolute(xdg)
+      ? xdg
       : path.join(homedir(), '.config');
   return path.join(configRoot, 'opencode', 'supervisor', 'config.json');
 };
@@ -1315,8 +1273,19 @@ const server = async (input: PluginInput, options?: PluginOptions): Promise<Hook
           timer.unref?.();
         }),
       ]);
-      const model = response.data?.small_model ?? response.data?.model;
-      if (typeof model === 'string' && model.trim() !== '') {
+      // Review round 4 (LOW): an empty-string `small_model` is not
+      // nullish, so a naive `??` would swallow the `model` fallback
+      // and mark the lookup resolved with no model — treat blank
+      // values as unset for both candidates.
+      const smallModel = response.data?.small_model;
+      const fullModel = response.data?.model;
+      const model =
+        typeof smallModel === 'string' && smallModel.trim() !== ''
+          ? smallModel
+          : typeof fullModel === 'string' && fullModel.trim() !== ''
+            ? fullModel
+            : undefined;
+      if (model !== undefined) {
         derivedModel = model;
       }
       derivedModelResolved = true;
@@ -1619,78 +1588,21 @@ const server = async (input: PluginInput, options?: PluginOptions): Promise<Hook
           verification.allowed &&
           !(hooks.tool !== undefined && Object.prototype.hasOwnProperty.call(hooks.tool, hookInput.tool))
         ) {
-          // FR-044: the approvals file is engineer-authored state;
-          // agent tool calls touching it are blocked by default.
-          // Review rounds 1-2 (HIGH, FR-061): the supervisor config
-          // files and the directives directory share that trust
-          // class — they carry the guard's enforcement toggles, the
-          // auditor model, and the enforce/approve/review rules, so
-          // an agent that could write them could defang its own
-          // supervisor across restarts. Review round 3 hardened both
-          // lenses. The path lens matches lexically normalized
-          // tokens (traversal collapses, leading dots fold away) —
-          // and for non-bash tools it reads only operational
-          // argument keys (filePath/path/directory/pattern), never
-          // write/edit content, because a mention inside a file
-          // being written is data, not a touch. The whole supervisor
-          // directory run is protected, so an ancestor spelling
-          // (`rm -rf .opencode/supervisor`) is blocked like any
-          // touch inside it. The raw lens scans only bash command
-          // strings, capped at 64 KiB — a command is an executable
-          // operation, so mentions there are actionable; it catches
-          // slash-free spellings (`cd .opencode/supervisor && cat
-          // config.json`) the path extractor cannot tokenize, and
-          // each bash call is a fresh process, so a cd cannot
-          // persist across calls. Block reasons name the protected
-          // object for the engineer, never the spelling the agent
-          // used.
-          const rawCommandLower =
-            hookInput.tool === 'bash'
-              ? JSON.stringify(output.args ?? {}).toLowerCase().slice(0, 65536)
-              : '';
-          // Review round 3: write/edit content is data, not
-          // operation — only operational keys carry touches for
-          // non-bash tools (bash commands go through the full
-          // extraction above; enforcement rules and gates keep the
-          // broader `argPaths` semantics).
-          const guardArgPaths =
-            hookInput.tool === 'bash'
-              ? argPaths
-              : extractPolicyPaths(
-                  Object.fromEntries(
-                    Object.entries(output.args ?? {}).filter(([key]) =>
-                      ['filePath', 'path', 'directory', 'pattern'].includes(key)
-                    )
-                  )
-                );
-          const normalizedArgPaths = guardArgPaths.map(normalizePathToken);
-          let protectedStateReason: string | null = null;
-          if (
-            normalizedArgPaths.some((p) => p.endsWith('approvals.json')) ||
-            rawCommandLower.includes('approvals.json')
-          ) {
-            protectedStateReason =
-              'the approvals file is engineer-authored state; the supervised agent may not touch it (engineer approval gates depend on it). Ask the engineer to update .opencode/supervisor/approvals.json.';
-          } else if (
-            normalizedArgPaths.some((p) => hasProtectedSegmentRun(p, 'opencode/supervisor/config.json')) ||
-            (rawCommandLower.includes('supervisor') && rawCommandLower.includes('config.json'))
-          ) {
-            protectedStateReason =
-              'the supervisor config file is engineer-authored state; the supervised agent may not touch it (tool-guard toggles and the auditor model depend on it). Ask the engineer to edit the supervisor config.json directly.';
-          } else if (
-            normalizedArgPaths.some((p) => hasProtectedSegmentRun(p, 'opencode/supervisor/directives')) ||
-            (rawCommandLower.includes('supervisor') && rawCommandLower.includes('directives'))
-          ) {
-            protectedStateReason =
-              'the supervisor directives are engineer-authored state; the supervised agent may not touch them (enforcement rules and gates depend on them). Ask the engineer to edit the directives directory directly.';
-          } else if (normalizedArgPaths.some((p) => hasProtectedSegmentRun(p, 'opencode/supervisor'))) {
-            protectedStateReason =
-              'the supervisor state directory is engineer-authored state; the supervised agent may not touch it (engineer directives, gates, and configuration depend on it). Ask the engineer to edit the .opencode/supervisor directory directly.';
-          }
-          if (protectedStateReason !== null) {
+          // FR-044/FR-061: the approvals file, the supervisor
+          // config files, the directives directory, and the whole
+          // supervisor state directory are engineer-authored state —
+          // agent tool calls touching them are blocked. Review
+          // round 4 moved the matching into `checkProtectedState`
+          // (src/tool-guard.ts): a normalized path-token lens with
+          // a content-key blocklist for non-bash tools, paired with
+          // a bash-only command-string scan. Block reasons name the
+          // protected object for the engineer, never the spelling
+          // the agent used.
+          const protectedReason = checkProtectedState(hookInput.tool, output.args, argPaths);
+          if (protectedReason !== null) {
             verification = {
               allowed: false,
-              reason: `Tool '${hookInput.tool}' blocked by the supervisor: ${protectedStateReason}`,
+              reason: `Tool '${hookInput.tool}' blocked by the supervisor: ${protectedReason}`,
             };
           }
           if (verification.allowed && compiledGates.approve.length > 0) {

@@ -131,10 +131,14 @@ alone.
 The tool guard SHALL block agent tool calls whose arguments touch
 the supervisor's engineer-authored state beyond the approvals file:
 the project and global supervisor config files and the directives
-directory. Blocking SHALL pair a lexically normalized path-token
-match with a raw-arguments test, so traversal spellings and
-relative directory-change evasion cannot bypass it. Block reasons
-SHALL be actionable without revealing the matched literal.
+directory. The named files and directories SHALL pair a lexically
+normalized path-token match with a raw bash command test, so
+traversal spellings and relative directory-change evasion cannot
+bypass them. The whole-supervisor-directory backstop applies the
+path-token lens only — a raw pairing on the bare word `supervisor`
+would false-positive too often — which is the documented residual.
+Block reasons SHALL be actionable without revealing the matched
+literal.
 
 #### Scenario: agent cannot write the supervisor config file
 

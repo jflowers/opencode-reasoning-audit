@@ -110,15 +110,15 @@ export const validateSupervisorConfig = (value: unknown): ParsedSupervisorConfig
   const config: SupervisorFileConfig = {};
   const reject = (error: string): ParsedSupervisorConfig => ({ config: {}, error });
 
-    const model = optionalString(value, 'auditorModel');
-    if (model.error !== null) return reject(model.error);
-    if (model.value !== undefined) config.auditorModel = model.value;
-    if (config.auditorModel !== undefined) {
-      const slash = config.auditorModel.indexOf('/');
-      if (slash <= 0 || slash === config.auditorModel.length - 1) {
-        return reject('"auditorModel" must be a provider/model slug (e.g. "provider/model")');
-      }
+  const model = optionalString(value, 'auditorModel');
+  if (model.error !== null) return reject(model.error);
+  if (model.value !== undefined) config.auditorModel = model.value;
+  if (config.auditorModel !== undefined) {
+    const slash = config.auditorModel.indexOf('/');
+    if (slash <= 0 || slash === config.auditorModel.length - 1) {
+      return reject('"auditorModel" must be a provider/model slug (e.g. "provider/model")');
     }
+  }
 
   const variantRaw = value.auditorVariant;
   if (variantRaw !== undefined) {
@@ -144,7 +144,7 @@ export const validateSupervisorConfig = (value: unknown): ParsedSupervisorConfig
     config.stripMode = stripModeRaw as StripMode;
   }
 
-  const numeric: readonly (keyof SupervisorFileConfig)[] = [
+  const numeric: readonly ('maxRegenerations' | 'maxOnDemandAudits')[] = [
     'maxRegenerations',
     'maxOnDemandAudits',
   ];
@@ -152,11 +152,11 @@ export const validateSupervisorConfig = (value: unknown): ParsedSupervisorConfig
     const parsed = optionalNumber(value, key);
     if (parsed.error !== null) return reject(parsed.error);
     if (parsed.value !== undefined) {
-      config[key] = parsed.value as never;
+      config[key] = parsed.value;
     }
   }
 
-  const booleanKeys: readonly (keyof SupervisorFileConfig)[] = [
+  const booleanKeys: readonly ('blockRewardHacking' | 'requireStepReferenceInTools')[] = [
     'blockRewardHacking',
     'requireStepReferenceInTools',
   ];
@@ -164,7 +164,7 @@ export const validateSupervisorConfig = (value: unknown): ParsedSupervisorConfig
     const parsed = optionalBoolean(value, key);
     if (parsed.error !== null) return reject(parsed.error);
     if (parsed.value !== undefined) {
-      config[key] = parsed.value as never;
+      config[key] = parsed.value;
     }
   }
 

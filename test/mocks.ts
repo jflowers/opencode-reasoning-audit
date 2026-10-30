@@ -32,3 +32,30 @@ export function recordingPluginInput(
   };
   return { input: input as unknown as PluginInput, logEntries };
 }
+
+/**
+ * Shared hook-layer test mock (review round 4): a silent plugin input —
+ * `app.log` is a no-op and `config.get` serves a derived model — for
+ * tests that exercise hook behavior rather than log routing. Previously
+ * the dominant inline stub across the audit, console, directives,
+ * gates, and reminders test files.
+ */
+export function silentPluginInput(directory: string = '/tmp/supervisor-test'): PluginInput {
+  const input = {
+    client: {
+      session: {
+        create: async () => ({ data: { id: 'mock-side-session' } }),
+        prompt: async () => ({ data: { info: {}, parts: [] } }),
+        promptAsync: async () => ({}),
+        abort: async () => ({}),
+        delete: async () => ({}),
+      },
+      app: {
+        log: async () => ({}),
+      },
+      config: { get: async () => ({ data: { small_model: 'mock/derived-model' } }) },
+    },
+    directory,
+  };
+  return input as unknown as PluginInput;
+}
