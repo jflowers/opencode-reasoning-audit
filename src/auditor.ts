@@ -18,9 +18,9 @@ export interface AuditConfig {
   /**
    * Provider + model slug, e.g. 'openai/o3-mini' or
    * 'enmaas/rits/deepseek-ai/DeepSeek-V4.1-Flash-1017'. Optional since
-   * FR-050: no slug is hardcoded — resolution (environment, config
+   * FR-059: no slug is hardcoded — resolution (environment, config
    * files, plugin options, derived fallback) lives in index.ts, and
-   * an unresolved model skips the LLM tier (FR-051).
+   * an unresolved model skips the LLM tier (FR-060).
    */
   auditorModel?: string;
   /** Reasoning effort / thinking variant passed to OpenCode provider; omitted when unset. */
@@ -246,7 +246,7 @@ export async function runPeerAudit(
     return localFailure;
   }
 
-  // FR-051: with no auditor model resolved, skip the LLM tier entirely —
+  // FR-060: with no auditor model resolved, skip the LLM tier entirely —
   // deterministic invariants above remain the whole audit.
   if (config.auditorModel === undefined) {
     return {

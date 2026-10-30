@@ -9,7 +9,7 @@ failing audit loop cannot degrade the terminal or flood the log.
 
 ## ADDED Requirements
 
-### Requirement: FR-043 server log routing
+### Requirement: FR-052 server log routing
 
 The middleware SHALL route all diagnostic output (info, warn,
 error) through a plugin logger that writes to the OpenCode server
@@ -32,7 +32,7 @@ stdout, stderr, or the console from any module or hook.
 - **THEN** each is delivered with its corresponding level
   (`info`, `warn`, `error`)
 
-### Requirement: FR-044 fire-and-forget delivery
+### Requirement: FR-053 fire-and-forget delivery
 
 The plugin logger SHALL deliver entries without awaiting the result
 and SHALL absorb delivery failures, including rejection from a
@@ -47,7 +47,7 @@ SHALL NOT produce an unhandled rejection.
 - **WHEN** the logger delivers an entry and the POST rejects
 - **THEN** the rejection is absorbed and plugin startup continues
 
-### Requirement: FR-045 deduplicated warn and error entries
+### Requirement: FR-054 deduplicated warn and error entries
 
 The plugin logger SHALL deduplicate repeated warn and error
 entries by identical level and message within the plugin process,
@@ -68,7 +68,7 @@ SHALL NOT be deduplicated.
 - **WHEN** a different warning message is emitted
 - **THEN** that message is delivered
 
-### Requirement: FR-046 identity line on first hook
+### Requirement: FR-055 identity line on first hook
 
 The middleware SHALL log its identity and version (with the
 resolved auditor model and directive count) at info level exactly

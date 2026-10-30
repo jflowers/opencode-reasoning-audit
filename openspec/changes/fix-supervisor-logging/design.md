@@ -49,10 +49,10 @@ preserving the src/ purity convention the same way
 ### D2: fire-and-forget, warn/error dedupe, info never deduped
 
 Delivery is `client.app.log(...).catch(() => {})` — never awaited,
-never rejecting, absorbing bootstrap-time refusals (FR-0044).
+never rejecting, absorbing bootstrap-time refusals (FR-053).
 Dedupe keys on `level:message` for warn and error only: the
 fail-open warning repeats identically per step and must collapse to
-one entry (FR-0045), while info lines (identity, directive
+one entry (FR-054), while info lines (identity, directive
 triggers, gate grants) are structurally rare and stay
 uncollapsed — the identity line may be retried after bootstrap, and
 collapsing it would make the retry a no-op. Dedupe state is
@@ -65,7 +65,7 @@ not be up; the old `console.log` identity line becomes a
 first-hook info entry: the first hook invocation to complete
 configuration resolution logs version, auditor model, and directive
 count once (module flag), when the listener is reliably up
-(FR-046).
+(FR-055).
 
 ### D4: config files and per-knob precedence
 
@@ -75,9 +75,11 @@ subset of the hook config (model as a full `provider/model` slug —
 ids work); unknown keys are ignored; type-invalid values or
 malformed JSON reject the whole file with an error string. I/O
 lives in `index.ts` (`readSupervisorConfigFile`), mirroring
-`readApprovals`: size-bounded via `statSync`, ENOENT is absent,
-anything else skips the file and warns once through the plugin
-logger. Locations: project `<dir>/.opencode/supervisor/config.json`
+`readApprovals`: size-bounded via a single-descriptor read
+(`openSync` once, `fstatSync` that descriptor, bound-check, then
+a `readSync` loop — review round 2's `readBoundedFile`, closing
+the stat-then-read TOCTOU). ENOENT is absent, anything else skips
+the file and warns once through the plugin logger. Locations: project `<dir>/.opencode/supervisor/config.json`
 and global `${XDG_CONFIG_HOME ?? ~/.config}/opencode/supervisor/
 config.json`. Resolution stays per-knob — each knob independently
 takes the highest tier that sets it — matching the existing
@@ -95,7 +97,7 @@ better than reading `opencode.jsonc` directly (no JSONC parsing,
 honors `OPENCODE_CONFIG` and XDG, single source of truth).
 Derivation is deferred to first need and memoized on success only:
 a bootstrap-time failure (listener down) leaves the cache empty and
-the next resolution retries (FR-049). The lookup happens inside a
+the next resolution retries (FR-058). The lookup happens inside a
 `buildConfig()` helper bound per `server()` call, so hooks keep
 using a plain resolved `HookConfig`.
 
@@ -106,7 +108,7 @@ using a plain resolved `HookConfig`.
 deterministic invariants short-circuit, an unset model returns
 `passed` for the step (invariants are the verification), and the
 hook layer logs one warning that the LLM tier is disabled
-(FR-051). This removes the hardcoded slug (FR-050) without
+(FR-060). This removes the hardcoded slug (FR-059) without
 resurrecting it as a different machine-specific default.
 
 ### D7: variant optional end to end
@@ -123,7 +125,10 @@ title degrades to `supervisor-audit @ <model>`.
   never blocking hooks; the identity line deliberately moves to
   first-hook time. Review round 1 narrowed the window: bootstrap
   warnings (directive/config/options) queue and flush at the same
-  first-hook moment.
+  first-hook moment. Review round 2 closed the last leak:
+  `loadDirectiveFiles` no longer logs at load time either — its
+  warnings join the same queue, so nothing is emitted during
+  `server()`.
 - **Project-file trust**: the project directory is agent-writable
   (a supervised agent could edit its own supervisor config). The
   environment tier outranks it, and config files only tune the
@@ -141,7 +146,15 @@ title degrades to `supervisor-audit @ <model>`.
   toggles and which tiers contributed, so a flipped knob is
   visible. Numeric knobs (e.g. `maxRegenerations`) stay
   uncapped by design: they are engineer-authored state, the
-  same trust class as the environment tier.
+  same trust class as the environment tier. Review round 2 widened
+  the net to match the trust class: the directives directory is
+  protected the same way (its files carry the enforce/approve/
+  review rules), and the check is two-lens — lexically normalized
+  path tokens (traversal `..` collapses) paired with a raw-args
+  scan — so slash-free `cd`-spellings cannot slip past either
+  lens (FR-061). Residual: variable indirection (`cat $CFG`) is
+  not caught; accepted — the same residual class as any
+  path-based guard.
 - **Dedupe hides recurring distinct failures**: only identical
   level+message pairs collapse; new messages always surface.
 - **Test ripple**: hook tests currently capture `console.*`; they

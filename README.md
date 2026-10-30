@@ -342,7 +342,9 @@ are read once at plugin start — a size bound of 64 KiB applies, and
 changes require an OpenCode restart to take effect (the approvals
 file is the deliberate contrast: it is re-read fresh per gated
 call). The config files are engineer-authored state: supervised tool
-calls touching them are blocked, like the approvals file. There
+calls touching them (or the directives directory) are blocked, like
+the approvals file — traversal and slash-free `cd` spellings are
+covered too. There
 is no default auditor model: with no tier setting one, the LLM audit
 tier is skipped entirely — deterministic invariants, the tool guard,
 and the memo remain active — and a warning names the state. The

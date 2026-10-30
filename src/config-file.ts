@@ -1,5 +1,5 @@
 /**
- * Supervisor config-file parsing (FR-047, FR-048): pure validation
+ * Supervisor config-file parsing (FR-056, FR-057): pure validation
  * for the optional JSON config files that tune the supervisor —
  * project `<dir>/.opencode/supervisor/config.json` and global
  * `${XDG_CONFIG_HOME:-~/.config}/opencode/supervisor/config.json`.

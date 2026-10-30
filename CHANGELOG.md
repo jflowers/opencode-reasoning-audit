@@ -17,7 +17,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   server listener that is not up yet at bootstrap loses only the
   line), warn/error entries dedupe per message so per-step
   fail-open loops cannot spray, and the identity line logs once at
-  the first hook invocation (FR-043..FR-046;
+  the first hook invocation (FR-052..FR-055;
   `openspec/changes/fix-supervisor-logging`).
 
 ### Changed
@@ -33,7 +33,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   anywhere, the LLM audit tier is skipped — deterministic
   invariants, the tool guard, and the memo remain active — and one
   warning names the state. The auditor variant is optional and is
-  omitted from the side-session prompt when unset (FR-047..FR-051).
+  omitted from the side-session prompt when unset (FR-056..FR-060).
 - Memo delivery moved from `experimental.chat.system.transform`
   to `experimental.chat.messages.transform`: OpenCode 1.19.0
   discards system-transform payload mutations (the request is
@@ -58,13 +58,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Migration notes
 
-- `resolveHookConfig`'s signature reordered: session overrides are
-  now the second positional argument behind the new sources object
-  (`{ project, global, options, derivedModel }`). A caller still
-  passing session overrides positionally has them silently ignored —
-  migrate to named properties.
-- `createInvokeModel` now requires the logger as its third argument;
-  the previous two-argument form throws inside error logging.
+- `resolveHookConfig`'s signature extended additively: session
+  overrides keep their 2.4.0 position (first argument), and the new
+  sources object (`{ project, global, options, derivedModel }`) is an
+  optional second argument. Existing callers work unchanged.
+- `createInvokeModel` accepts the logger as an optional third
+  argument: two-argument callers keep working — side-session delete
+  failures fall back to silence rather than throwing.
 - The supervisor config files (`<project>/.opencode/supervisor/config.json`,
   `${XDG_CONFIG_HOME:-~/.config}/opencode/supervisor/config.json`)
   are read once per server start and are now agent-write-protected:

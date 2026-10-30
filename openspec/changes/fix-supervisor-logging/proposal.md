@@ -52,6 +52,11 @@ opencode.log`) with a service tag, level, and message.
   warning is logged. The auditor variant is optional end to end and
   omitted from the side-session prompt when unset.
 - Changed: version 2.5.0 (backward-compatible minor).
+- Added: the tool guard blocks agent tool calls that touch
+  protected supervisor state — the supervisor config files and the
+  directives directory (FR-061) — extending the approvals.json
+  precedent, with normalized-token plus raw-arguments pairing so
+  traversal spellings cannot evade it.
 
 ## Capabilities
 
@@ -59,17 +64,21 @@ opencode.log`) with a service tag, level, and message.
 
 - `supervisor-logging`: the plugin's log sink — server-log routing
   via the SDK client, fire-and-forget delivery, dedupe, and the
-  no-stdout/stderr guarantee (FR-043..FR-046).
+  no-stdout/stderr guarantee (FR-052..FR-055).
 - `auditor-config`: where the auditor model comes from — the config
   files, the resolution chain, the derived fallback, and the
-  no-model behavior (FR-047..FR-051).
+  no-model behavior (FR-056..FR-060).
 
 ### Modified Capabilities
 
-None. `reasoning-audit` (FR-004, FR-005) gains its model-config and
-logging behavior through the `auditor-config` and
-`supervisor-logging` deltas to stay self-contained, following the
-agent-reminders precedent.
+- `reasoning-audit` (tool guard, FR-009..FR-012): the guard now
+  also blocks tool calls that touch protected supervisor state —
+  the supervisor config files and the directives directory
+  (FR-061, specified in the `auditor-config` delta) — closing an
+  agent-writable path to defanging the supervisor across
+  restarts. The model-config and logging behavior stays in the
+  new-capability deltas to stay self-contained, following the
+  agent-reminders precedent.
 
 ## Impact
 
