@@ -337,7 +337,12 @@ Settings resolve in order of precedence at runtime:
 
 Config files accept any subset of the knobs below; unknown keys are
 ignored, and a malformed or wrong-typed file is skipped with one
-warning in the server log (fail-open, like directive loading). There
+warning in the server log (fail-open, like directive loading). Files
+are read once at plugin start — a size bound of 64 KiB applies, and
+changes require an OpenCode restart to take effect (the approvals
+file is the deliberate contrast: it is re-read fresh per gated
+call). The config files are engineer-authored state: supervised tool
+calls touching them are blocked, like the approvals file. There
 is no default auditor model: with no tier setting one, the LLM audit
 tier is skipped entirely — deterministic invariants, the tool guard,
 and the memo remain active — and a warning names the state. The
