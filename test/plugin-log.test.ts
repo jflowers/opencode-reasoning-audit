@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import type { PluginInput } from '@opencode-ai/plugin';
-import { createPluginLogger, PLUGIN_LOG_DEDUPE_CAP, PLUGIN_LOG_SERVICE } from '../src/plugin-log.ts';
+import { createPluginLogger, PLUGIN_LOG_DEDUPE_CAP, PLUGIN_LOG_SERVICE, silentPluginLogger } from '../src/plugin-log.ts';
 
 /** Recorded /log call shape. */
 interface RecordedLogCall {
@@ -21,6 +21,14 @@ function recordingClient(): { client: PluginInput['client']; calls: RecordedLogC
   };
   return { client: client as unknown as PluginInput['client'], calls };
 }
+
+test('silentPluginLogger absorbs every level without throwing', () => {
+  // Review round 5: the shared no-op backs optional-logger call
+  // sites (createInvokeModel's 2-arg fallback) and test stubs.
+  assert.equal(silentPluginLogger.info('identity'), undefined);
+  assert.equal(silentPluginLogger.warn('config file ignored'), undefined);
+  assert.equal(silentPluginLogger.error('transport down'), undefined);
+});
 
 test('createPluginLogger routes info, warn, and error through app.log with the service tag', () => {
   const { client, calls } = recordingClient();

@@ -4,7 +4,7 @@
 
 - [x] 1.1 [P] Write `proposal.md`, `design.md`,
   `specs/supervisor-logging/spec.md` (FR-052..FR-055),
-  `specs/auditor-config/spec.md` (FR-056..FR-060), and this
+  `specs/auditor-config/spec.md` (FR-056..FR-061), and this
   `tasks.md`. Verify: every scenario carries GIVEN/WHEN/THEN; RFC
   2119 wording; line length under 72.
 
@@ -47,6 +47,16 @@
   in `runPeerAudit` when no model resolved, with one hook-layer
   warning (FR-059, FR-060). Bump `PLUGIN_VERSION` and
   `package.json` to 2.5.0.
+- [x] 3.5 [P] Extend the tool guard to protected supervisor state
+  (FR-061, specified in the `auditor-config` delta; glob
+  semantics hardened in review round 5): policy-path extraction in
+  `src/directives.ts` covers the supervisor config files, the
+  directives directory, and glob metacharacters;
+  `checkProtectedState` in `src/tool-guard.ts` pairs normalized
+  path-token matching with a raw bash-arguments test and
+  glob-segment semantics, wired into the guard in `index.ts`.
+  Verify: traversal, relative-directory, and glob spellings are
+  blocked in `test/gates.test.ts`.
 
 ## 4. Tests
 
@@ -78,10 +88,12 @@
   `node --test` runs all eight files green.
 - [x] 5.2 [P] Update docs: `README.md` config table (no hardcoded
   default; resolution chain; config-file section; logging
-  section), `CHANGELOG.md` 2.5.0 entry, `AGENTS.md`
-  config-resolution bullet, `skills/reasoning-auditor/skill.md`
-  model references, `src/auditor.ts` JSDoc (FR-059). Verify: no
-  stale `google/gemini` references outside history entries.
+  section) and the tool-guard and engineer-console sections for
+  protected supervisor state (§4.2, §6), `CHANGELOG.md` 2.5.0
+  entry, `AGENTS.md` config-resolution bullet,
+  `skills/reasoning-auditor/skill.md` model references,
+  `src/auditor.ts` JSDoc (FR-059). Verify: no stale
+  `google/gemini` references outside history entries.
   Release follow-ups tracked in #30 (docs), #31 (blog), #4
   (tutorial, scope extended), and unbound-force/website#347
   (capability pages).

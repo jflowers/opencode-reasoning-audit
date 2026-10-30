@@ -59,3 +59,16 @@ export function silentPluginInput(directory: string = '/tmp/supervisor-test'): P
   };
   return input as unknown as PluginInput;
 }
+
+/**
+ * Shared silent client surface (review round 5): spread into bespoke
+ * mock clients so hand-built harnesses get the same no-op `app.log`
+ * and derived-model `config.get` as `silentPluginInput` without
+ * re-copying the pair. Tests that need a different `config.get`
+ * (an empty config, to keep no model resolved) keep that part
+ * inline after the spread.
+ */
+export const silentClientSurface = {
+  app: { log: async () => ({}) },
+  config: { get: async () => ({ data: { small_model: 'mock/derived-model' } }) },
+};

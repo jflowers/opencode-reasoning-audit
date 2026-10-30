@@ -55,6 +55,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   and this changelog own that history. Docs-only: no behavior changed;
   every configuration knob, tool, rule kind, and limitation remains
   documented (#28).
+- The standalone skill (`skills/reasoning-auditor/skill.md`) tracks
+  the middleware: 1.0.0 → 1.1.0, referencing the host's configured
+  model instead of the retired `google/gemini-3.8-flash` slug. A
+  specific auditor model can still be set through the skill
+  frontmatter or the OpenCode config. Users who installed the skill
+  standalone should re-copy it into
+  `~/.config/opencode/skills/reasoning-auditor/` (README §8).
 
 ### Migration notes
 

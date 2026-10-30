@@ -34,8 +34,9 @@ opencode.log`) with a service tag, level, and message.
   written.
 - Added: `src/config-file.ts` — pure parsing for supervisor config
   files. Project file: `<project>/.opencode/supervisor/config.json`.
-  Global file: `${XDG_CONFIG_HOME:-~/.config}/opencode/supervisor/
-  config.json`. Any subset of the hook config may be set; files are
+  Global file:
+  `${XDG_CONFIG_HOME:-~/.config}/opencode/supervisor/config.json`.
+  Any subset of the hook config may be set; files are
   size-bounded; absent files are absent; malformed files are skipped
   with one warning.
 - Added: plugin tuple options accept a `config` object alongside
@@ -84,8 +85,11 @@ opencode.log`) with a service tag, level, and message.
 
 - **Code**: new `src/plugin-log.ts`, new `src/config-file.ts`;
   `index.ts` (logger threading, config resolution, identity line,
-  twenty console sites); `src/auditor.ts` (optional model/variant,
-  invariant-only path); `package.json` (2.5.0).
+  twenty console sites, tool-guard protected-state wiring);
+  `src/auditor.ts` (optional model/variant, invariant-only path);
+  `src/directives.ts` (protected-path extraction);
+  `src/tool-guard.ts` (protected-state matching);
+  `package.json` (2.5.0).
 - **Docs**: `README.md` (config table, config-file section, logging
   section), `CHANGELOG.md` (2.5.0), `AGENTS.md` (config-resolution
   bullet), `skills/reasoning-auditor/skill.md` (model references).

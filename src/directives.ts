@@ -454,11 +454,15 @@ export const globToRegExp = (glob: string): RegExp => {
  * dotfile names. Deliberately broader than the trace check's
  * source-extension extractor — a forbidPath glob must see `.env`,
  * `secrets/credentials.pem`, and extensionless paths the extension
- * allowlist would miss (review round 1). Over-extraction is safe:
+ * allowlist would miss (review round 1). Glob metacharacters
+ * (`*?[]`) are class members so bash glob spellings extract whole —
+ * fragmenting at the metacharacter had let
+ * `.opencode/su*ervisor/app*vals.json` slip past the
+ * protected-state guard (review round 5). Over-extraction is safe:
  * candidates only matter when a directive glob still has to match.
  */
 const POLICY_PATH_PATTERN =
-  /\/?[A-Za-z0-9_.\-~@]+\/[A-Za-z0-9_.\-~@/]*|\.[A-Za-z0-9][A-Za-z0-9_.\-]*/g;
+  /\/?[A-Za-z0-9_.\-~@*?\[\]]+\/[A-Za-z0-9_.\-~@/*?\[\]]*|\.[A-Za-z0-9][A-Za-z0-9_.\-*?\[\]]*/g;
 
 /**
  * Extracts policy-relevant path candidates from tool arguments

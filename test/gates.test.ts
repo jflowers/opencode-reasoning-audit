@@ -11,7 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type { Hooks, PluginInput, ToolContext } from '@opencode-ai/plugin';
 import plugin from '../index.ts';
-import { recordingPluginInput, silentPluginInput } from './mocks.ts';
+import { recordingPluginInput, silentClientSurface, silentPluginInput } from './mocks.ts';
 import {
   approvalMatches,
   compileGates,
@@ -22,7 +22,7 @@ import {
   parseApprovals,
   type ApprovalRecord,
 } from '../src/gates.ts';
-import type { Directive } from '../src/directives.ts';
+import { extractPolicyPaths, type Directive } from '../src/directives.ts';
 import { checkProtectedState, hasProtectedSegmentRun, normalizePathToken } from '../src/tool-guard.ts';
 
 // ── Helpers (each test file is self-contained) ──
@@ -80,13 +80,19 @@ const GATES_ENV_NAMES = [
   'OPENCODE_SUPERVISOR_MAX_ON_DEMAND_AUDITS',
 ];
 
-/** Saves/deletes the supervisor env knobs around `run`, restoring after. */
+/** Saves/deletes the supervisor env knobs and isolates XDG_CONFIG_HOME around `run`, restoring after. */
 async function withCleanGatesEnv(run: () => Promise<void>): Promise<void> {
   const saved: Record<string, string | undefined> = {};
   for (const name of GATES_ENV_NAMES) {
     saved[name] = process.env[name];
     delete process.env[name];
   }
+  // Isolate the global config tier (review round 5): a real
+  // ~/.config/opencode/supervisor/config.json on the host must not
+  // leak into tier resolution through XDG_CONFIG_HOME.
+  const savedXdgHome = process.env.XDG_CONFIG_HOME;
+  const isolatedXdgRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'supervisor-xdg-'));
+  process.env.XDG_CONFIG_HOME = isolatedXdgRoot;
   try {
     await run();
   } finally {
@@ -98,6 +104,12 @@ async function withCleanGatesEnv(run: () => Promise<void>): Promise<void> {
         process.env[name] = value;
       }
     }
+    if (savedXdgHome === undefined) {
+      delete process.env.XDG_CONFIG_HOME;
+    } else {
+      process.env.XDG_CONFIG_HOME = savedXdgHome;
+    }
+    fs.rmSync(isolatedXdgRoot, { recursive: true, force: true });
   }
 }
 
@@ -132,8 +144,7 @@ function auditInput(response: string, directory: string): { input: PluginInput; 
           return {};
         },
       },
-      app: { log: async () => ({}) },
-      config: { get: async () => ({ data: { small_model: 'mock/derived-model' } }) },
+      ...silentClientSurface,
     },
     directory,
   };
@@ -661,6 +672,21 @@ test('hasProtectedSegmentRun matches consecutive segment runs only', () => {
   assert.ok(!hasProtectedSegmentRun('stale-approvals.json', 'approvals.json'));
 });
 
+test('hasProtectedSegmentRun matches glob spellings of protected runs', () => {
+  // Review round 5: bash expands `su*ervisor` and `app*vals.json`
+  // onto the protected path at execution time — exact-segment
+  // equality alone was a bypass.
+  assert.ok(hasProtectedSegmentRun('opencode/su*ervisor/app*vals.json', 'approvals.json'));
+  assert.ok(
+    hasProtectedSegmentRun('opencode/[s]upervisor/config.json', 'opencode/supervisor/config.json')
+  );
+  assert.ok(
+    hasProtectedSegmentRun('config/opencode/su?ervisor/config.json', 'opencode/supervisor/config.json')
+  );
+  // A glob that does not expand onto the needle still misses.
+  assert.ok(!hasProtectedSegmentRun('opencode/app*valsx.json', 'approvals.json'));
+});
+
 test('checkProtectedState blocks the approvals file for non-bash tools', () => {
   const reason = checkProtectedState('read', { path: '.opencode/supervisor/approvals.json' }, []);
   assert.ok(reason !== null, 'expected the approvals file to be blocked');
@@ -696,6 +722,32 @@ test('checkProtectedState allows lookalike approval filenames', () => {
   // token boundaries, so neither fires.
   assert.equal(checkProtectedState('read', { path: 'stale-approvals.json' }, []), null);
   assert.equal(checkProtectedState('bash', { command: 'cat stale-approvals.json' }, []), null);
+});
+
+test('checkProtectedState blocks glob spellings for non-bash tools', () => {
+  // Review round 5: extraction fragmented glob tokens at the
+  // metacharacter, and exact-segment matching missed the pieces.
+  const configReason = checkProtectedState('read', { path: '.opencode/[s]upervisor/config.json' }, []);
+  assert.ok(configReason !== null, 'expected the bracket-glob config spelling to be blocked');
+  assert.ok(configReason!.includes('supervisor config file'), configReason!);
+  const directivesReason = checkProtectedState(
+    'read',
+    { target: '.opencode/su*ervisor/dir*ives/rule.md' },
+    []
+  );
+  assert.ok(directivesReason !== null, 'expected the star-glob directives spelling to be blocked');
+  assert.ok(directivesReason!.includes('supervisor directives'), directivesReason!);
+});
+
+test('checkProtectedState blocks bash glob spellings end to end', () => {
+  // The bash branch consumes argPaths as-is, so this also proves
+  // the extended extractor keeps glob tokens whole.
+  const command = `echo '{"gate":"deploy"}' > .opencode/su*ervisor/app*vals.json`;
+  const argPaths = extractPolicyPaths({ command });
+  assert.ok(argPaths.includes('.opencode/su*ervisor/app*vals.json'), argPaths.join(', '));
+  const reason = checkProtectedState('bash', { command }, argPaths);
+  assert.ok(reason !== null, 'expected the glob approvals spelling to be blocked');
+  assert.ok(reason!.includes('approvals file'), reason!);
 });
 
 test('the agent cannot touch the approvals file', async () => {
@@ -901,6 +953,32 @@ test('lookalike approval filenames are not blocked (FR-061)', async () => {
         dispatchToolBefore(hooks, 'gate-self-9', 'bash', {
           command: 'cat stale-approvals.json',
         })
+      );
+      await hooks.dispose!();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+test('bash glob spellings cannot touch protected state (FR-061)', async () => {
+  await withCleanGatesEnv(async () => {
+    const dir = makeDirectiveDir({});
+    try {
+      const hooks = await plugin.server(silentPluginInput(dir));
+      // Review round 5: the shell expands `su*ervisor`/`app*vals.json`
+      // onto the protected path at execution time — the guard must
+      // match glob spellings, not only exact segments.
+      await assert.rejects(
+        dispatchToolBefore(hooks, 'gate-self-10', 'bash', {
+          command: `echo '{"gate":"deploy"}' > .opencode/su*ervisor/app*vals.json`,
+        }),
+        (error: unknown) => {
+          const message = error instanceof Error ? error.message : String(error);
+          assert.ok(message.includes('engineer-authored state'), message);
+          assert.ok(message.includes('approvals.json'), message);
+          return true;
+        }
       );
       await hooks.dispose!();
     } finally {

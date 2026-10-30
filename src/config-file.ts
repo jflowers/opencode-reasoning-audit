@@ -74,14 +74,19 @@ const optionalString = (
   return { value: raw, error: null };
 };
 
+/**
+ * Count knobs are whole numbers (review round 5): a fractional or
+ * non-finite value rejects the tier instead of rounding silently
+ * downstream. `Number.isInteger` folds the finite check in.
+ */
 const optionalNumber = (
   owner: Record<string, unknown>,
   key: string
 ): { value?: number; error: string | null } => {
   const raw = owner[key];
   if (raw === undefined) return { error: null };
-  if (typeof raw !== 'number' || !Number.isFinite(raw) || raw < 0) {
-    return { error: `"${key}" must be a non-negative finite number` };
+  if (typeof raw !== 'number' || !Number.isInteger(raw) || raw < 0) {
+    return { error: `"${key}" must be a non-negative integer` };
   }
   return { value: raw, error: null };
 };
@@ -112,7 +117,9 @@ export const validateSupervisorConfig = (value: unknown): ParsedSupervisorConfig
 
   const model = optionalString(value, 'auditorModel');
   if (model.error !== null) return reject(model.error);
-  if (model.value !== undefined) config.auditorModel = model.value;
+  // Trim before the slug check (review round 5): a whitespace-padded
+  // slug passed validation but failed provider resolution later.
+  if (model.value !== undefined) config.auditorModel = model.value.trim();
   if (config.auditorModel !== undefined) {
     const slash = config.auditorModel.indexOf('/');
     if (slash <= 0 || slash === config.auditorModel.length - 1) {
@@ -177,7 +184,7 @@ export const validateSupervisorConfig = (value: unknown): ParsedSupervisorConfig
     for (const key of MEMO_LIMIT_KEYS) {
       const parsed = optionalNumber(memoLimitsRaw, key);
       if (parsed.error !== null) {
-        return reject(`"memoLimits.${key}" must be a non-negative finite number`);
+        return reject(`"memoLimits.${key}" must be a non-negative integer`);
       }
       if (parsed.value !== undefined) {
         limits[key] = parsed.value;

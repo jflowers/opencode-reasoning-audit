@@ -90,7 +90,7 @@ import {
   type ParsedSupervisorConfig,
   type SupervisorFileConfig,
 } from './src/config-file.ts';
-import { createPluginLogger, type PluginLogger } from './src/plugin-log.ts';
+import { createPluginLogger, silentPluginLogger, type PluginLogger } from './src/plugin-log.ts';
 
 // ── Configuration (session plugin config → environment → defaults) ──
 
@@ -666,12 +666,9 @@ function extractResponseText(parts: readonly SessionPromptPart[] | undefined): s
 export function createInvokeModel(client: PluginInput['client'], directory: string, logger?: PluginLogger): InvokeModel {
   // Review round 2 (additive signature): the logger is optional so
   // 2-arg callers from 2.4.0 keep working — without one, delete
-  // failures fall back to silence rather than throwing.
-  const log = logger ?? {
-    info: () => undefined,
-    warn: () => undefined,
-    error: () => undefined,
-  };
+  // failures fall back to the shared silent logger (review round 5)
+  // rather than throwing.
+  const log = logger ?? silentPluginLogger;
   return async (prompt: string, config: AuditConfig): Promise<string> => {
     if (config.auditorModel === undefined) {
       throw new Error('no auditor model configured');
@@ -1911,8 +1908,14 @@ const server = async (input: PluginInput, options?: PluginOptions): Promise<Hook
               // Passed focus joins the verified trace in stripped form —
               // the same trust class as passed reasoning steps (FR-037).
               state.verifiedSteps.push(stripped);
+              // Review round 5: surface the assurance level so a passed
+              // on-demand audit never overclaims LLM review.
               if (outcome.error !== undefined) {
                 logger.warn(`on-demand audit failed open; focus recorded as passed: ${outcome.error}`);
+                return `Audit infrastructure failed open — the focus is recorded as passed without LLM review:\n${stripped}`;
+              }
+              if (config.auditorModel === undefined) {
+                return `Audit passed on deterministic invariants only (no auditor model configured) — the focus is recorded in the verified trace:\n${stripped}`;
               }
               return `Audit passed — the focus is recorded in the verified trace:\n${stripped}`;
             }

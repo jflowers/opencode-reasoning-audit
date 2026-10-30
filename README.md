@@ -26,7 +26,7 @@ while it happens.
   before a tool executes; gated calls wait for engineer sign-off.
 - **[The supervisor memo](#43-the-supervisor-memo)** — a bounded memo
   (goal, directives, reminders, solved items, reports, critiques)
-  rides the system prompt every turn.
+  rides the conversation as one trailing user message every turn.
 - **[The agent console](#5-the-agent-console)** — five self-serve
   tools: durable reminders, full-state recall, engineer reports,
   on-demand audits.
@@ -453,6 +453,10 @@ cp skills/reasoning-auditor/skill.md ~/.config/opencode/skills/reasoning-auditor
   bound.
 - Supervision state is in-process only; restarting OpenCode clears the
   goal, the verified trace, and the logs.
+- The derived host-model fallback resolves through
+  `client.config.get` with a 5s timeout; while it keeps failing,
+  hook-blocking paths absorb up to 5s per lookup and ~25s
+  cumulatively before the 60s backoff engages (FR-058 residual).
 - The verified-trace path check is best-effort: a tool call racing an
   in-flight audit sees the partial trace (an empty trace never
   blocks). Directive globs are root-anchored and case-insensitive;
@@ -465,8 +469,12 @@ cp skills/reasoning-auditor/skill.md ~/.config/opencode/skills/reasoning-auditor
   plus a raw bash command lens), so an `enforce` `forbidPath` rule
   over `.opencode/supervisor/**` is optional defense-in-depth.
   Residuals: bash heredoc/echo prose can false-positive the raw
-  lens; write/edit content is never scanned (content is data, not
-  operation); variable indirection (`cat $CFG`) is not caught; the
+  lens; write/edit content (`content`, `oldString`, `newString`)
+  is never scanned (content is data, not operation), while other
+  payload keys (`text`, `body`, `document`, `patch`, `diff`,
+  `edits`, `data`) are not on that blocklist, so their content
+  is scanned and can false-positive — accepted fail-closed;
+  variable indirection (`cat $CFG`) is not caught; the
   directory backstop uses the path lens only. Review gates block
   the first matching calls of a session until a passing audit
   references the path.

@@ -6,6 +6,9 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import type { Hooks, PluginInput, ToolContext } from '@opencode-ai/plugin';
 import plugin, { sessionState } from '../index.ts';
 import {
@@ -20,7 +23,7 @@ import {
   type AgentReport,
 } from '../src/console.ts';
 import { buildMemo } from '../src/memo.ts';
-import { silentPluginInput } from './mocks.ts';
+import { silentClientSurface, silentPluginInput } from './mocks.ts';
 
 /** A stored report with a fixed timestamp — the module never touches the clock. */
 function report(kind: AgentReport['kind'], text: string): AgentReport {
@@ -97,13 +100,19 @@ const CONSOLE_ENV_NAMES = [
   'OPENCODE_SUPERVISOR_MAX_ON_DEMAND_AUDITS',
 ];
 
-/** Saves/deletes the supervisor env knobs around `run`, restoring after. */
+/** Saves/deletes the supervisor env knobs and isolates XDG_CONFIG_HOME around `run`, restoring after. */
 async function withCleanConsoleEnv(run: () => Promise<void>): Promise<void> {
   const saved: Record<string, string | undefined> = {};
   for (const name of CONSOLE_ENV_NAMES) {
     saved[name] = process.env[name];
     delete process.env[name];
   }
+  // Isolate the global config tier (review round 5): a real
+  // ~/.config/opencode/supervisor/config.json on the host must not
+  // leak into tier resolution through XDG_CONFIG_HOME.
+  const savedXdgHome = process.env.XDG_CONFIG_HOME;
+  const isolatedXdgRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'supervisor-xdg-'));
+  process.env.XDG_CONFIG_HOME = isolatedXdgRoot;
   try {
     await run();
   } finally {
@@ -115,6 +124,12 @@ async function withCleanConsoleEnv(run: () => Promise<void>): Promise<void> {
         process.env[name] = value;
       }
     }
+    if (savedXdgHome === undefined) {
+      delete process.env.XDG_CONFIG_HOME;
+    } else {
+      process.env.XDG_CONFIG_HOME = savedXdgHome;
+    }
+    fs.rmSync(isolatedXdgRoot, { recursive: true, force: true });
   }
 }
 
@@ -148,8 +163,7 @@ function auditInput(response: string): { input: PluginInput; calls: Record<strin
           return {};
         },
       },
-      app: { log: async () => ({}) },
-      config: { get: async () => ({ data: { small_model: 'mock/derived-model' } }) },
+      ...silentClientSurface,
     },
     directory: '/tmp/supervisor-test',
   };
@@ -447,6 +461,72 @@ test('request_audit records a passing focus in the verified trace', async () => 
   });
 });
 
+test('request_audit names the assurance level when no auditor model resolved', async () => {
+  await withCleanConsoleEnv(async () => {
+    // Review round 5: no model anywhere — env knobs are cleared, the
+    // config files are absent, and the host config serves none — so
+    // deterministic invariants are the whole audit and the result
+    // must not overclaim LLM review.
+    const input = {
+      client: {
+        session: {
+          create: async () => ({ data: { id: 'side-1' } }),
+          prompt: async () => ({ data: { info: {}, parts: [{ type: 'text', text: PASSED_AUDIT }] } }),
+          promptAsync: async () => ({}),
+          abort: async () => ({}),
+          delete: async () => ({}),
+        },
+        app: { log: async () => ({}) },
+        config: { get: async () => ({ data: {} }) },
+      },
+      directory: '/tmp/supervisor-test',
+    };
+    const hooks = await plugin.server(input as unknown as PluginInput);
+    const result = await hooks.tool!.request_audit.execute(
+      { focus: 'the rate = 24 * 15 = 360' },
+      toolContext('console-audit-invariants')
+    );
+    assert.equal(
+      result,
+      'Audit passed on deterministic invariants only (no auditor model configured) — the focus is recorded in the verified trace:\nthe rate = 24 * 15 = 360'
+    );
+    assert.deepEqual(sessionState.get('console-audit-invariants').verifiedSteps, ['the rate = 24 * 15 = 360']);
+  });
+});
+
+test('request_audit names the assurance level when the audit infrastructure fails open', async () => {
+  await withCleanConsoleEnv(async () => {
+    // Review round 5: the derived model resolves, but the side-session
+    // prompt rejects — the audit fails open (FR-005) and the result
+    // must say so instead of a plain "Audit passed".
+    const input = {
+      client: {
+        session: {
+          create: async () => ({ data: { id: 'side-1' } }),
+          prompt: async () => {
+            throw new Error('side session unavailable');
+          },
+          promptAsync: async () => ({}),
+          abort: async () => ({}),
+          delete: async () => ({}),
+        },
+        ...silentClientSurface,
+      },
+      directory: '/tmp/supervisor-test',
+    };
+    const hooks = await plugin.server(input as unknown as PluginInput);
+    const result = await hooks.tool!.request_audit.execute(
+      { focus: 'the rate = 24 * 15 = 360' },
+      toolContext('console-audit-fail-open')
+    );
+    assert.equal(
+      result,
+      'Audit infrastructure failed open — the focus is recorded as passed without LLM review:\nthe rate = 24 * 15 = 360'
+    );
+    assert.deepEqual(sessionState.get('console-audit-fail-open').verifiedSteps, ['the rate = 24 * 15 = 360']);
+  });
+});
+
 test('request_audit returns the critique in the result without steering on failure', async () => {
   await withCleanConsoleEnv(async () => {
     const { input, calls } = auditInput(PASSED_AUDIT);
@@ -578,8 +658,7 @@ test('console tools return an inert result in auditor side sessions', async () =
             return {};
           },
         },
-        app: { log: async () => ({}) },
-        config: { get: async () => ({ data: { small_model: 'mock/derived-model' } }) },
+        ...silentClientSurface,
       },
       directory: '/tmp/supervisor-test',
     };
