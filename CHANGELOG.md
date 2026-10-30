@@ -68,9 +68,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - The supervisor config files (`<project>/.opencode/supervisor/config.json`,
   `${XDG_CONFIG_HOME:-~/.config}/opencode/supervisor/config.json`)
   are read once per server start and are now agent-write-protected:
-  supervised tool calls touching them are blocked, like the
-  approvals file. Edit them as the engineer, then restart OpenCode
-  to apply.
+  supervised tool calls touching them — or the directives
+  directory — are blocked, like the approvals file (supervised
+  agents can no longer edit directive files either). Edit them as
+  the engineer, then restart OpenCode to apply.
+- `AuditConfig.auditorModel` is now `string | undefined` — the one
+  type-visible change on the exported TypeScript surface.
 
 ## [2.4.0] - 2026-10-26
 

@@ -64,7 +64,6 @@ function mockPluginInput(directory: string): PluginInput {
   } as unknown as PluginInput;
 }
 
-/** A plugin input whose app.log records entries, for log-routing tests (FR-052). */
 // recordingPluginInput now lives in ./mocks.ts (review round 2, CS-004).
 
 /** Event-hook input shape, for casting deliberately undeclared event payloads. */

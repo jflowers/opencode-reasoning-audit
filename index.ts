@@ -958,6 +958,12 @@ function registerMessagesTransform(hooks: Hooks, handler: MessagesTransformHandl
 // ── Plugin entry (design D1) ───────────────────────────────────────
 
 /**
+ * Bound on one directive file (review round 3): a planted oversized
+ * file skips as unreadable instead of stalling plugin load.
+ */
+const MAX_DIRECTIVE_FILE_BYTES = 65536;
+
+/**
  * Loads directive files (FR-026) from
  * `<directory>/.opencode/supervisor/directives/*.md`, sorted by
  * filename for deterministic precedence. A missing directory yields
@@ -966,8 +972,11 @@ function registerMessagesTransform(hooks: Hooks, handler: MessagesTransformHandl
  * warning (fail-open, FR-032; review round 1: a blanket catch hid
  * per-file failures and dropped the whole set; review round 2: the
  * warnings are RETURNED rather than logged, so the caller can defer
- * them past the bootstrap listener-down window). I/O lives here in
- * the hook layer (design D3); parsing is pure in src/directives.ts.
+ * them past the bootstrap listener-down window; review round 3: each
+ * read is bounded and non-blocking via `readBoundedFile`, so a
+ * planted oversized or non-regular file cannot stall load). I/O lives
+ * here in the hook layer (design D3); parsing is pure in
+ * src/directives.ts.
  */
 const loadDirectiveFiles = (
   directory: string
@@ -993,13 +1002,20 @@ const loadDirectiveFiles = (
     .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   const files: { name: string; content: string }[] = [];
   for (const entry of sorted) {
-    try {
-      files.push({
-        name: entry.name,
-        content: fs.readFileSync(path.join(directivesDir, entry.name), 'utf8'),
-      });
-    } catch (error) {
-      warnings.push(`directive file '${entry.name}' unreadable (${errorText(error)}); skipped`);
+    // Review round 3: the read is bounded and non-blocking — a
+    // planted oversized or non-regular directive file (a FIFO stalls
+    // a plain open) skips as unreadable instead of stalling load.
+    const { text, error } = readBoundedFile(
+      path.join(directivesDir, entry.name),
+      MAX_DIRECTIVE_FILE_BYTES,
+      'directive file'
+    );
+    if (error !== null) {
+      warnings.push(`directive file '${entry.name}' unreadable (${error}); skipped`);
+    } else if (text !== null) {
+      files.push({ name: entry.name, content: text });
+    } else {
+      warnings.push(`directive file '${entry.name}' unreadable (vanished); skipped`);
     }
   }
   return { files, warnings };
@@ -1024,7 +1040,10 @@ const loadDirectiveFiles = (
  * cannot slip an oversized file past the bound. An absent file is
  * reported as absent (absence is a state, not an error); an oversized
  * file reports the bound error with `what` naming the file kind; any
- * other failure returns its error text.
+ * other failure returns its error text. Review round 3: the open is
+ * non-blocking and non-regular files — a FIFO planted at a guarded
+ * path would stall a plain open forever — report 'not a regular
+ * file' instead of hanging the event loop.
  *
  * @param filePath Absolute path to read.
  * @param maxBytes The inclusive upper bound on bytes read.
@@ -1038,7 +1057,7 @@ const readBoundedFile = (
 ): { text: string | null; error: string | null } => {
   let fd: number;
   try {
-    fd = fs.openSync(filePath, 'r');
+    fd = fs.openSync(filePath, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
       return { text: null, error: null };
@@ -1047,6 +1066,9 @@ const readBoundedFile = (
   }
   try {
     const stats = fs.fstatSync(fd);
+    if (!stats.isFile()) {
+      return { text: null, error: `${what} is not a regular file` };
+    }
     if (stats.size > maxBytes) {
       return {
         text: null,
@@ -1071,7 +1093,10 @@ const readBoundedFile = (
 /**
  * Lexically normalize an extracted path token (FR-061): backslashes
  * fold to slashes, `.` and empty segments drop, `..` pops its parent,
- * and matching folds to lowercase. Traversal spellings
+ * leading dots fold away (`.opencode` ≡ `opencode` — review round 3:
+ * the project and global supervisor spellings unify; an exact-segment
+ * needle had left the project tier dead code), and matching folds to
+ * lowercase. Traversal spellings
  * (`.opencode/supervisor/../supervisor/config.json`) collapse onto
  * the protected path so suffix matching cannot be dodged.
  */
@@ -1085,7 +1110,14 @@ const normalizePathToken = (token: string): string => {
       segments.pop();
       continue;
     }
-    segments.push(segment.toLowerCase());
+    // Review round 3: leading dots fold away, so the project spelling
+    // ('.opencode/supervisor') and the global one
+    // ('~/.config/opencode/supervisor') normalize identically — the
+    // protected-segment needles below are blind to neither tier.
+    const folded = segment.replace(/^\.+/, '').toLowerCase();
+    if (folded !== '') {
+      segments.push(folded);
+    }
   }
   return segments.join('/');
 };
@@ -1272,11 +1304,14 @@ const server = async (input: PluginInput, options?: PluginOptions): Promise<Hook
       derivedLookupFailed = true;
       return derivedModel;
     }
+    // Review round 3 (LOW): the losing timeout timer is cleared on
+    // every path, so a fast success does not leave it pending.
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       const response = await Promise.race([
         input.client.config.get({ query: { directory: input.directory } }),
         new Promise<never>((_, reject) => {
-          const timer = setTimeout(() => reject(new Error('config.get timed out')), DERIVED_LOOKUP_TIMEOUT_MS);
+          timer = setTimeout(() => reject(new Error('config.get timed out')), DERIVED_LOOKUP_TIMEOUT_MS);
           timer.unref?.();
         }),
       ]);
@@ -1294,6 +1329,10 @@ const server = async (input: PluginInput, options?: PluginOptions): Promise<Hook
       derivedConsecutiveFailures += 1;
       if (derivedConsecutiveFailures >= DERIVED_LOOKUP_FAILURE_BUDGET) {
         derivedNextAttemptAt = Date.now() + DERIVED_LOOKUP_BACKOFF_MS;
+      }
+    } finally {
+      if (timer !== undefined) {
+        clearTimeout(timer);
       }
     }
     return derivedModel;
@@ -1587,36 +1626,66 @@ const server = async (input: PluginInput, options?: PluginOptions): Promise<Hook
           // class — they carry the guard's enforcement toggles, the
           // auditor model, and the enforce/approve/review rules, so
           // an agent that could write them could defang its own
-          // supervisor across restarts. The check pairs two lenses
-          // so evasion spellings cannot slip past either: extracted
-          // path tokens are lexically normalized before segment-run
-          // matching (traversal collapses), and the raw serialized
-          // arguments are scanned for the protected names — catching
+          // supervisor across restarts. Review round 3 hardened both
+          // lenses. The path lens matches lexically normalized
+          // tokens (traversal collapses, leading dots fold away) —
+          // and for non-bash tools it reads only operational
+          // argument keys (filePath/path/directory/pattern), never
+          // write/edit content, because a mention inside a file
+          // being written is data, not a touch. The whole supervisor
+          // directory run is protected, so an ancestor spelling
+          // (`rm -rf .opencode/supervisor`) is blocked like any
+          // touch inside it. The raw lens scans only bash command
+          // strings, capped at 64 KiB — a command is an executable
+          // operation, so mentions there are actionable; it catches
           // slash-free spellings (`cd .opencode/supervisor && cat
-          // config.json`) the path extractor cannot tokenize. Block
-          // reasons name the protected object for the engineer,
-          // never the spelling the agent used.
-          const rawArgsLower = JSON.stringify(output.args ?? {}).toLowerCase();
-          const normalizedArgPaths = argPaths.map(normalizePathToken);
+          // config.json`) the path extractor cannot tokenize, and
+          // each bash call is a fresh process, so a cd cannot
+          // persist across calls. Block reasons name the protected
+          // object for the engineer, never the spelling the agent
+          // used.
+          const rawCommandLower =
+            hookInput.tool === 'bash'
+              ? JSON.stringify(output.args ?? {}).toLowerCase().slice(0, 65536)
+              : '';
+          // Review round 3: write/edit content is data, not
+          // operation — only operational keys carry touches for
+          // non-bash tools (bash commands go through the full
+          // extraction above; enforcement rules and gates keep the
+          // broader `argPaths` semantics).
+          const guardArgPaths =
+            hookInput.tool === 'bash'
+              ? argPaths
+              : extractPolicyPaths(
+                  Object.fromEntries(
+                    Object.entries(output.args ?? {}).filter(([key]) =>
+                      ['filePath', 'path', 'directory', 'pattern'].includes(key)
+                    )
+                  )
+                );
+          const normalizedArgPaths = guardArgPaths.map(normalizePathToken);
           let protectedStateReason: string | null = null;
           if (
             normalizedArgPaths.some((p) => p.endsWith('approvals.json')) ||
-            rawArgsLower.includes('approvals.json')
+            rawCommandLower.includes('approvals.json')
           ) {
             protectedStateReason =
               'the approvals file is engineer-authored state; the supervised agent may not touch it (engineer approval gates depend on it). Ask the engineer to update .opencode/supervisor/approvals.json.';
           } else if (
             normalizedArgPaths.some((p) => hasProtectedSegmentRun(p, 'opencode/supervisor/config.json')) ||
-            (rawArgsLower.includes('supervisor') && rawArgsLower.includes('config.json'))
+            (rawCommandLower.includes('supervisor') && rawCommandLower.includes('config.json'))
           ) {
             protectedStateReason =
               'the supervisor config file is engineer-authored state; the supervised agent may not touch it (tool-guard toggles and the auditor model depend on it). Ask the engineer to edit the supervisor config.json directly.';
           } else if (
             normalizedArgPaths.some((p) => hasProtectedSegmentRun(p, 'opencode/supervisor/directives')) ||
-            (rawArgsLower.includes('supervisor') && rawArgsLower.includes('directives'))
+            (rawCommandLower.includes('supervisor') && rawCommandLower.includes('directives'))
           ) {
             protectedStateReason =
               'the supervisor directives are engineer-authored state; the supervised agent may not touch them (enforcement rules and gates depend on them). Ask the engineer to edit the directives directory directly.';
+          } else if (normalizedArgPaths.some((p) => hasProtectedSegmentRun(p, 'opencode/supervisor'))) {
+            protectedStateReason =
+              'the supervisor state directory is engineer-authored state; the supervised agent may not touch it (engineer directives, gates, and configuration depend on it). Ask the engineer to edit the .opencode/supervisor directory directly.';
           }
           if (protectedStateReason !== null) {
             verification = {

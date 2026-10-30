@@ -328,7 +328,10 @@ Settings resolve in order of precedence at runtime:
 4. **Global config file** —
    `${XDG_CONFIG_HOME:-~/.config}/opencode/supervisor/config.json`.
 5. **Derived model** (`auditorModel` only) — the host's `small_model`,
-   then `model`, read from the OpenCode config.
+   then `model`, read from the OpenCode config; the lookup times out
+   after 5 seconds and, after five consecutive failures, backs off
+   for 60 seconds between attempts (deterministic invariants stay
+   active throughout).
 6. **Defaults** — the `pluginConfig` object at the top of `index.ts`.
 
 > A session-plugin-config tier exists in the resolver, but no runtime
