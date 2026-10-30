@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type { Hooks, PluginInput } from '@opencode-ai/plugin';
 import plugin, { sessionState } from '../index.ts';
+import { recordingPluginInput } from './mocks.ts';
 import {
   activeDirectives,
   compileEnforcement,
@@ -54,7 +55,7 @@ function mockPluginInput(directory: string): PluginInput {
         abort: async () => ({}),
         delete: async () => ({}),
       },
-      // FR-043/FR-049: the hook layer logs through /log and derives the
+      // FR-052/FR-058: the hook layer logs through /log and derives the
       // auditor model from the OpenCode config — the mock provides both.
       app: { log: async () => ({}) },
       config: { get: async () => ({ data: { small_model: 'mock/derived-model' } }) },
@@ -63,33 +64,8 @@ function mockPluginInput(directory: string): PluginInput {
   } as unknown as PluginInput;
 }
 
-/** A plugin input whose app.log records entries, for log-routing tests (FR-043). */
-function recordingPluginInput(
-  directory: string
-): { input: PluginInput; logEntries: Array<{ level: string; message: string }> } {
-  const logEntries: Array<{ level: string; message: string }> = [];
-  const input = {
-    client: {
-      session: {
-        create: async () => ({ data: { id: 'mock-side-session' } }),
-        prompt: async () => ({ data: { info: {}, parts: [] } }),
-        promptAsync: async () => ({}),
-        abort: async () => ({}),
-        delete: async () => ({}),
-      },
-      app: {
-        log: async (options: unknown) => {
-          const body = (options as { body?: { level?: string; message?: string } }).body;
-          logEntries.push({ level: body?.level ?? '', message: body?.message ?? '' });
-          return {};
-        },
-      },
-      config: { get: async () => ({ data: { small_model: 'mock/derived-model' } }) },
-    },
-    directory,
-  };
-  return { input: input as unknown as PluginInput, logEntries };
-}
+/** A plugin input whose app.log records entries, for log-routing tests (FR-052). */
+// recordingPluginInput now lives in ./mocks.ts (review round 2, CS-004).
 
 /** Event-hook input shape, for casting deliberately undeclared event payloads. */
 type EventHookInput = Parameters<NonNullable<Hooks['event']>>[0];
@@ -850,7 +826,7 @@ test('the directive count bound drops the overflow with a warning', async () => 
       assert.ok(memo.includes('- d20: policy 20'));
       assert.ok(!memo.includes('d21'));
       await hooks.dispose!();
-      // FR-043: the overflow warning rides the server log, not stderr.
+      // FR-052: the overflow warning rides the server log, not stderr.
       assert.ok(logEntries.some((entry) => entry.level === 'warn' && entry.message.includes('beyond the cap')));
     });
   } finally {
@@ -984,7 +960,7 @@ test('the first-recorded trigger for a directive is logged once', async () => {
       await dispatchToolBefore(hooks, 'trigger-log-session', 'edit', { path: 'src/legacy/queue.ts' });
       await dispatchToolBefore(hooks, 'trigger-log-session', 'edit', { path: 'src/legacy/other.ts' });
       await hooks.dispose!();
-      // FR-043: the trigger observation rides the server log, not stdout.
+      // FR-052: the trigger observation rides the server log, not stdout.
       const hits = logEntries.filter(
         (entry) => entry.level === 'info' && entry.message.includes("directive 'legacy-note' triggered by tool 'edit'")
       );

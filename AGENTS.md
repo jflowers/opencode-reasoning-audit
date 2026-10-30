@@ -70,7 +70,7 @@ opencode-supervisor/
 - **Module headers**: every file in `src/` starts with a JSDoc block describing the module's purpose.
 - **Types**: export interfaces for config and result shapes (`AuditConfig`, `PeerAuditOutcome`, `ToolVerificationResult`); prefer string-literal union types for enums (`'code_and_math' | 'balanced' | 'strict'`).
 - **Purity**: keep `src/` functions pure and testable; session state and OpenCode hooks live only in `index.ts`.
-- **Configuration**: resolve settings through a precedence chain (session plugin config → environment variables → `pluginConfig` defaults).
+- **Configuration**: resolve settings through a precedence chain (session plugin config → environment variables → project config file → plugin options → global config file → derived host model (`auditorModel` only) → `pluginConfig` defaults).
 - **Spec writing**: RFC 2119 language (MUST/SHOULD/MAY), Given/When/Then scenarios, FR-NNN requirement numbering, line length under 72 characters.
 
 ## Testing Conventions

@@ -1,7 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import type { Hooks, PluginInput } from '@opencode-ai/plugin';
-import plugin, { createInvokeModel, resolveHookConfig, sessionState } from '../index.ts';
+import plugin, { createInvokeModel, PLUGIN_VERSION, resolveHookConfig, sessionState } from '../index.ts';
+import { recordingPluginInput } from './mocks.ts';
 import { stripNarrative } from '../src/stripper.ts';
 import {
   resolveAuditorConfig,
@@ -57,7 +59,7 @@ const baseAuditConfig: AuditConfig = {
   requireStepReferenceInTools: true,
 };
 
-// FR-043: createInvokeModel logs delete failures through the plugin
+// FR-052: createInvokeModel logs delete failures through the plugin
 // logger — a silent stand-in keeps these adapter tests focused on the
 // side-session call contract.
 const stubLogger: PluginLogger = { info: () => {}, warn: () => {}, error: () => {} };
@@ -338,7 +340,7 @@ function mockPluginInput(): PluginInput {
         abort: async () => ({}),
         delete: async () => ({}),
       },
-      // FR-043/FR-049: the hook layer logs through /log and derives the
+      // FR-052/FR-058: the hook layer logs through /log and derives the
       // auditor model from the OpenCode config — the mock provides both.
       app: { log: async () => ({}) },
       config: { get: async () => ({ data: { small_model: 'mock/derived-model' } }) },
@@ -347,31 +349,8 @@ function mockPluginInput(): PluginInput {
   } as unknown as PluginInput;
 }
 
-/** A plugin input whose app.log records entries, for log-routing tests (FR-043). */
-function recordingPluginInput(): { input: PluginInput; logEntries: Array<{ level: string; message: string }> } {
-  const logEntries: Array<{ level: string; message: string }> = [];
-  const input = {
-    client: {
-      session: {
-        create: async () => ({ data: { id: 'mock-side-session' } }),
-        prompt: async () => ({ data: { info: {}, parts: [] } }),
-        promptAsync: async () => ({}),
-        abort: async () => ({}),
-        delete: async () => ({}),
-      },
-      app: {
-        log: async (options: unknown) => {
-          const body = (options as { body?: { level?: string; message?: string } }).body;
-          logEntries.push({ level: body?.level ?? '', message: body?.message ?? '' });
-          return {};
-        },
-      },
-      config: { get: async () => ({ data: { small_model: 'mock/derived-model' } }) },
-    },
-    directory: '/tmp/supervisor-test',
-  };
-  return { input: input as unknown as PluginInput, logEntries };
-}
+/** A plugin input whose app.log records entries, for log-routing tests (FR-052). */
+// recordingPluginInput now lives in ./mocks.ts (review round 2, CS-004).
 
 test('plugin module imports cleanly and exports the PluginModule entry', async () => {
   // The id matches the plugin-config key (review finding #5): a user
@@ -389,6 +368,13 @@ test('plugin module imports cleanly and exports the PluginModule entry', async (
   // FR-020/FR-021: the agent console tools register alongside the hooks.
   assert.equal(typeof hooks.tool?.remind_me?.execute, 'function');
   assert.equal(typeof hooks.tool?.forget_reminder?.execute, 'function');
+});
+
+test('PLUGIN_VERSION stays in lockstep with package.json (release integrity)', () => {
+  const pkg = JSON.parse(
+    fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')
+  ) as { version: string };
+  assert.equal(PLUGIN_VERSION, pkg.version);
 });
 
 test('resolveHookConfig resolves hook knobs session → environment → defaults', () => {
@@ -411,7 +397,7 @@ test('resolveHookConfig resolves hook knobs session → environment → defaults
 
   try {
     // Session plugin config wins, including meaningful falsy values.
-    const fromSession = resolveHookConfig({}, {
+    const fromSession = resolveHookConfig({
       config: {
         plugins: {
           'opencode-supervisor': {
@@ -450,7 +436,7 @@ test('resolveHookConfig resolves hook knobs session → environment → defaults
       delete process.env[name];
     }
     const fromDefaults = resolveHookConfig();
-    // FR-050: no hardcoded model default — the auditor resolves from the
+    // FR-059: no hardcoded model default — the auditor resolves from the
     // tiers or stays unset (LLM audit disabled, invariants only).
     assert.equal(fromDefaults.auditorModel, undefined);
     assert.equal(fromDefaults.auditorVariant, undefined);
@@ -544,7 +530,7 @@ test('createInvokeModel drives a dedicated auditor side session and returns its 
   const { client, calls } = auditorClientMock({
     createData: { id: 'auditor-side-1' },
     promptData: {
-      info: { providerID: 'google', modelID: 'gemini-3.8-flash' },
+      info: { providerID: 'mock-provider', modelID: 'mock-model' },
       parts: [
         { type: 'text', text: 'Audit complete.' },
         { type: 'reasoning', text: 'internal deliberation' },
@@ -1637,7 +1623,7 @@ function dispatchToolBefore(hooks: DispatchHooks, sessionID: string, tool: strin
 }
 
 /**
- * FR-043 restated for tests: the plugin logs through the server's /log
+ * FR-052 restated for tests: the plugin logs through the server's /log
  * endpoint (captured by `recordingPluginInput`), never console.* — the
  * log-routing tests below assert recorded entries instead of stderr.
  */
@@ -1819,7 +1805,7 @@ test('tool.execute.before fails open when the guard infrastructure throws', asyn
     await assert.doesNotReject(() =>
       dispatchToolBefore(hooks, sessionID, 'bash', { command: 'cat src/anything.ts' })
     );
-    // FR-043: the fail-open trace rides the server log, not stderr.
+    // FR-052: the fail-open trace rides the server log, not stderr.
     assert.ok(logEntries.some((entry) => entry.level === 'error' && entry.message.includes('tool guard failed open')));
 
     // Drop the corrupted entry so nothing later observes it.
@@ -1834,7 +1820,7 @@ test('tool.execute.before logs every block with the reason before throwing', asy
     const sessionID = 'guard-block-log';
     sessionState.get(sessionID).verifiedSteps.push('Edit src/a.ts to export the helper.');
 
-    // Spike 1.3, restated for FR-043: the host does not log trigger
+    // Spike 1.3, restated for FR-052: the host does not log trigger
     // failures, so the plugin's own server-log entry is the block's
     // only trace.
     await assert.rejects(

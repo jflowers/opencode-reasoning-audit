@@ -11,7 +11,7 @@ provider.
 
 ## ADDED Requirements
 
-### Requirement: FR-047 auditor model resolution chain
+### Requirement: FR-056 auditor model resolution chain
 
 For each configurable knob (auditor model, auditor variant, strip
 mode, regeneration bound, guard toggles, memo limits, on-demand
@@ -36,7 +36,7 @@ the default.
 - **WHEN** the effective configuration is resolved
 - **THEN** the environment variable's model wins
 
-### Requirement: FR-048 supervisor config files
+### Requirement: FR-057 supervisor config files
 
 The middleware SHALL read optional JSON config files at
 `<project>/.opencode/supervisor/config.json` (project) and
@@ -61,14 +61,17 @@ keys SHALL be ignored.
 - **THEN** no value from that file is applied and exactly one
   warning is logged
 
-### Requirement: FR-049 derived fallback model
+### Requirement: FR-058 derived fallback model
 
 When no other source sets the auditor model, the middleware SHALL
 derive it from the OpenCode configuration via the SDK client,
 preferring `small_model` and falling back to `model`. Derivation
 SHALL be lazy and memoized on success only, so a failed lookup
 during bootstrap is retried on the next resolution. A derived model
-SHALL NOT be cached from a failed response.
+SHALL NOT be cached from a failed response. Each attempt SHALL be
+time-bounded, and repeated consecutive failures SHALL back off
+between attempts, so a hanging or persistently failing endpoint
+cannot stall every hook behind the lookup.
 
 #### Scenario: derivation prefers small_model
 
@@ -84,7 +87,7 @@ SHALL NOT be cached from a failed response.
 - **WHEN** the next resolution runs after the listener is up
 - **THEN** derivation is attempted again and succeeds
 
-### Requirement: FR-050 no hardcoded auditor model
+### Requirement: FR-059 no hardcoded auditor model
 
 The middleware SHALL NOT embed a default auditor model slug. The
 plugin's built-in defaults SHALL leave the auditor model (and
@@ -100,7 +103,7 @@ or configuration.
 - **THEN** the auditor model is the derived one and no
   `ProviderModelNotFoundError` originates from the plugin default
 
-### Requirement: FR-051 no-model behavior and optional variant
+### Requirement: FR-060 no-model behavior and optional variant
 
 When no auditor model resolves, the middleware SHALL skip the LLM
 audit tier, SHALL still run deterministic invariants, SHALL record
@@ -122,3 +125,28 @@ alone.
 - **WHEN** an audit side session is created
 - **THEN** the prompt body omits the variant field and the session
   title names the model without a variant suffix
+
+### Requirement: FR-061 protected supervisor state
+
+The tool guard SHALL block agent tool calls whose arguments touch
+the supervisor's engineer-authored state beyond the approvals file:
+the project and global supervisor config files and the directives
+directory. Blocking SHALL pair a lexically normalized path-token
+match with a raw-arguments test, so traversal spellings and
+relative directory-change evasion cannot bypass it. Block reasons
+SHALL be actionable without revealing the matched literal.
+
+#### Scenario: agent cannot write the supervisor config file
+
+- **GIVEN** a supervised session with the tool guard active
+- **WHEN** a tool call's arguments reference a supervisor config
+  file
+- **THEN** the call is blocked with a reason that names the
+  engineer-authored state and directs the agent to the engineer
+
+#### Scenario: traversal spelling is still blocked
+
+- **GIVEN** a supervised session with the tool guard active
+- **WHEN** a tool call's arguments reference the config file
+  through `..` segments or a relative directory-change spelling
+- **THEN** the call is still blocked

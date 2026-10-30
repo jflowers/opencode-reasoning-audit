@@ -13,7 +13,7 @@ import {
 } from '../src/config-file.ts';
 import { DEFAULT_MEMO_LIMITS } from '../src/memo.ts';
 
-// ── Pure validation (FR-048) ──────────────────────────────────────
+// ── Pure validation (FR-057) ──────────────────────────────────────
 
 test('validateSupervisorConfig accepts a full valid config', () => {
   const parsed = validateSupervisorConfig({
@@ -91,7 +91,7 @@ test('parseSupervisorConfigFile parses valid JSON and reports malformed JSON', (
   assert.equal(array.error, 'configuration must be a JSON object');
 });
 
-// ── Resolution precedence (FR-047) ─────────────────────────────────
+// ── Resolution precedence (FR-056) ─────────────────────────────────
 
 /** Every OPENCODE_SUPERVISOR_* knob, for env-cleaning around tier tests. */
 const CONFIG_ENV_NAMES = [
@@ -116,7 +116,7 @@ async function withCleanConfigEnv(run: () => Promise<void>): Promise<void> {
     delete process.env[name];
   }
   // The identity line and its no-model follow-up are once-per-process
-  // (FR-046); reset so each tier test's harness observes its own.
+  // (FR-055); reset so each tier test's harness observes its own.
   logIdentityState.identityLogged = false;
   logIdentityState.identitySaidNoModel = false;
   try {
@@ -149,27 +149,27 @@ test('resolveHookConfig tiers the auditor model project → options → global �
     };
 
     // Project wins over every later tier.
-    assert.equal(resolveHookConfig(sources).auditorModel, 'project/model');
+    assert.equal(resolveHookConfig(undefined, sources).auditorModel, 'project/model');
     // Options wins over global and derived.
-    assert.equal(resolveHookConfig({ ...sources, project: undefined }).auditorModel, 'options/model');
+    assert.equal(resolveHookConfig(undefined, { ...sources, project: undefined }).auditorModel, 'options/model');
     // Global wins over derived.
     assert.equal(
-      resolveHookConfig({ ...sources, project: undefined, options: undefined }).auditorModel,
+      resolveHookConfig(undefined, { ...sources, project: undefined, options: undefined }).auditorModel,
       'global/model'
     );
     // Derived is the last model tier.
-    assert.equal(resolveHookConfig({ ...sources, project: undefined, options: undefined, global: undefined }).auditorModel, 'derived/model');
-    // With nothing set, the auditor stays unset (FR-050/FR-051).
-    assert.equal(resolveHookConfig({ ...sources, project: undefined, options: undefined, global: undefined, derivedModel: undefined }).auditorModel, undefined);
+    assert.equal(resolveHookConfig(undefined, { ...sources, project: undefined, options: undefined, global: undefined }).auditorModel, 'derived/model');
+    // With nothing set, the auditor stays unset (FR-059/FR-060).
+    assert.equal(resolveHookConfig(undefined, { ...sources, project: undefined, options: undefined, global: undefined, derivedModel: undefined }).auditorModel, undefined);
 
     // The derived tier applies to the model only — never the variant.
-    const derivedOnly = resolveHookConfig({ derivedModel: 'derived/model' });
+    const derivedOnly = resolveHookConfig(undefined, { derivedModel: 'derived/model' });
     assert.equal(derivedOnly.auditorModel, 'derived/model');
     assert.equal(derivedOnly.auditorVariant, undefined);
 
     // Per-knob file tiers: project maxRegenerations and memoLimits apply,
     // unmentioned memoLimits fields keep the plugin defaults.
-    const tiered = resolveHookConfig(sources);
+    const tiered = resolveHookConfig(undefined, sources);
     assert.equal(tiered.maxRegenerations, 5);
     assert.equal(tiered.memoLimits.maxReminders, 3);
     assert.equal(tiered.memoLimits.maxSolvedItems, DEFAULT_MEMO_LIMITS.maxSolvedItems);
@@ -180,7 +180,7 @@ test('resolveHookConfig keeps the environment above the file tiers', async () =>
   await withCleanConfigEnv(async () => {
     process.env.OPENCODE_SUPERVISOR_MODEL = 'env/model';
     process.env.OPENCODE_SUPERVISOR_MAX_REGENERATIONS = '9';
-    const config = resolveHookConfig({
+    const config = resolveHookConfig(undefined, {
       project: { auditorModel: 'project/model', maxRegenerations: 5 },
     });
     assert.equal(config.auditorModel, 'env/model');
@@ -188,7 +188,7 @@ test('resolveHookConfig keeps the environment above the file tiers', async () =>
   });
 });
 
-// ── Server-level config-file integration (FR-048/FR-049/FR-051) ──
+// ── Server-level config-file integration (FR-057/FR-058/FR-060) ──
 
 /** Event-hook input shape, for casting deliberately undeclared event payloads. */
 type EventHookInput = Parameters<NonNullable<Hooks['event']>>[0];
@@ -333,7 +333,7 @@ test('the derived tier prefers small_model over model', async () => {
   }
 });
 
-test('a failed derived lookup is retried on the next resolution (FR-049)', async () => {
+test('a failed derived lookup is retried on the next resolution (FR-058)', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'supervisor-config-'));
   try {
     await withCleanConfigEnv(async () => {
@@ -389,7 +389,7 @@ test('with no model anywhere the LLM tier is skipped and the config GET is not r
       assert.ok(
         harness.logEntries.some((entry) => entry.level === 'warn' && entry.message.includes('LLM peer audit disabled'))
       );
-      // FR-051: the steps still pass through the invariants and verify.
+      // FR-060: the steps still pass through the invariants and verify.
       assert.equal(sessionState.get('config-none-session').verifiedSteps.length, 2);
       await hooks.dispose!();
     });

@@ -11,6 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type { Hooks, PluginInput, ToolContext } from '@opencode-ai/plugin';
 import plugin from '../index.ts';
+import { recordingPluginInput } from './mocks.ts';
 import {
   approvalMatches,
   compileGates,
@@ -58,7 +59,7 @@ function mockPluginInput(directory: string): PluginInput {
         abort: async () => ({}),
         delete: async () => ({}),
       },
-      // FR-043/FR-049: the hook layer logs through /log and derives the
+      // FR-052/FR-058: the hook layer logs through /log and derives the
       // auditor model from the OpenCode config — the mock provides both.
       app: { log: async () => ({}) },
       config: { get: async () => ({ data: { small_model: 'mock/derived-model' } }) },
@@ -67,33 +68,8 @@ function mockPluginInput(directory: string): PluginInput {
   } as unknown as PluginInput;
 }
 
-/** A plugin input whose app.log records entries, for log-routing tests (FR-043). */
-function recordingPluginInput(
-  directory: string
-): { input: PluginInput; logEntries: Array<{ level: string; message: string }> } {
-  const logEntries: Array<{ level: string; message: string }> = [];
-  const input = {
-    client: {
-      session: {
-        create: async () => ({ data: { id: 'mock-side-session' } }),
-        prompt: async () => ({ data: { info: {}, parts: [] } }),
-        promptAsync: async () => ({}),
-        abort: async () => ({}),
-        delete: async () => ({}),
-      },
-      app: {
-        log: async (options: unknown) => {
-          const body = (options as { body?: { level?: string; message?: string } }).body;
-          logEntries.push({ level: body?.level ?? '', message: body?.message ?? '' });
-          return {};
-        },
-      },
-      config: { get: async () => ({ data: { small_model: 'mock/derived-model' } }) },
-    },
-    directory,
-  };
-  return { input: input as unknown as PluginInput, logEntries };
-}
+/** A plugin input whose app.log records entries, for log-routing tests (FR-052). */
+// recordingPluginInput now lives in ./mocks.ts (review round 2, CS-004).
 
 /** Minimal ToolContext: the console tools only read `sessionID`. */
 function toolContext(sessionID: string): ToolContext {
@@ -716,6 +692,78 @@ test('the agent cannot touch the supervisor config file', async () => {
           const message = error instanceof Error ? error.message : String(error);
           assert.ok(message.includes('engineer-authored state'), message);
           assert.ok(message.includes('supervisor config file'), message);
+          return true;
+        }
+      );
+      await hooks.dispose!();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+test('traversal spellings of the supervisor config file are still blocked (FR-061)', async () => {
+  await withCleanGatesEnv(async () => {
+    const dir = makeDirectiveDir({});
+    try {
+      const hooks = await plugin.server(mockPluginInput(dir));
+      await assert.rejects(
+        dispatchToolBefore(hooks, 'gate-self-3', 'bash', {
+          command: 'cat .opencode/supervisor/../supervisor/config.json',
+        }),
+        (error: unknown) => {
+          const message = error instanceof Error ? error.message : String(error);
+          assert.ok(message.includes('engineer-authored state'), message);
+          assert.ok(message.includes('supervisor config file'), message);
+          return true;
+        }
+      );
+      await hooks.dispose!();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+test('slash-free cd spellings of the supervisor config file are still blocked (FR-061)', async () => {
+  await withCleanGatesEnv(async () => {
+    const dir = makeDirectiveDir({});
+    try {
+      const hooks = await plugin.server(mockPluginInput(dir));
+      await assert.rejects(
+        dispatchToolBefore(hooks, 'gate-self-4', 'bash', {
+          // The path extractor tokenizes `cd .opencode/supervisor`
+          // but cannot extract the slash-free `config.json` — the
+          // raw-arguments pairing lens catches it.
+          command: 'cd .opencode/supervisor && cat config.json',
+        }),
+        (error: unknown) => {
+          const message = error instanceof Error ? error.message : String(error);
+          assert.ok(message.includes('engineer-authored state'), message);
+          assert.ok(message.includes('supervisor config file'), message);
+          return true;
+        }
+      );
+      await hooks.dispose!();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+test('the agent cannot touch the supervisor directives directory (FR-061)', async () => {
+  await withCleanGatesEnv(async () => {
+    const dir = makeDirectiveDir({});
+    try {
+      const hooks = await plugin.server(mockPluginInput(dir));
+      await assert.rejects(
+        dispatchToolBefore(hooks, 'gate-self-5', 'bash', {
+          command: 'rm .opencode/supervisor/directives/no-forbid.md',
+        }),
+        (error: unknown) => {
+          const message = error instanceof Error ? error.message : String(error);
+          assert.ok(message.includes('engineer-authored state'), message);
+          assert.ok(message.includes('supervisor directives'), message);
           return true;
         }
       );

@@ -56,7 +56,7 @@ test('warn and error entries dedupe by level and message; info never dedupes', (
   // The same MESSAGE at a different level is a different entry.
   logger.error('same warning');
   // Info entries are structurally rare (identity, triggers, grants) and
-  // never deduplicated, so a retried identity line still lands (FR-045).
+  // never deduplicated, so a retried identity line still lands (FR-054).
   logger.info('same info');
   logger.info('same info');
 
@@ -128,7 +128,7 @@ test('a client without a resolvable app surface is absorbed synchronously', () =
   assert.doesNotThrow(() => logger.error('degraded client'));
 });
 
-test('the logger never writes to console (FR-043: no stdout/stderr)', () => {
+test('the logger never writes to console (FR-052: no stdout/stderr)', () => {
   const { client } = recordingClient();
   const logger = createPluginLogger(client);
 

@@ -110,7 +110,7 @@ const ENV_MAX_ON_DEMAND_AUDITS = 'OPENCODE_SUPERVISOR_MAX_ON_DEMAND_AUDITS';
  * bounds (FR-017). Resolved per use by `resolveHookConfig` with the
  * precedence session plugin config → environment → project file →
  * plugin options → global file → derived model (auditorModel only) →
- * `pluginConfig` defaults (FR-047).
+ * `pluginConfig` defaults (FR-056).
  */
 export interface HookConfig extends AuditConfig {
   /** Caps on memo solved items, critiques, reminders, and reports (FR-017, FR-023, FR-035/FR-036). */
@@ -121,10 +121,10 @@ export interface HookConfig extends AuditConfig {
 
 /**
  * Plugin defaults — the lowest precedence tier. No auditor model or
- * variant default exists (FR-050): the auditor resolves from the
+ * variant default exists (FR-059): the auditor resolves from the
  * environment, the config files, the tuple options, or the derived
- * OpenCode model (FR-047), and with none set the LLM audit tier is
- * skipped entirely (FR-051). The v0 HTTP-endpoint auditor fallback
+ * OpenCode model (FR-056), and with none set the LLM audit tier is
+ * skipped entirely (FR-060). The v0 HTTP-endpoint auditor fallback
  * is gone: audits run only through the side session (D2).
  */
 export const pluginConfig: HookConfig = {
@@ -142,10 +142,10 @@ export const pluginConfig: HookConfig = {
  * build. `package.json` cannot be imported from here without a build
  * step, so the constant is the source of truth for the log prefix.
  */
-const PLUGIN_VERSION = '2.5.0';
+export const PLUGIN_VERSION = '2.5.0';
 
 /**
- * Log-identity state (FR-046): the module-identity line is emitted
+ * Log-identity state (FR-055): the module-identity line is emitted
  * once per process, at the first hook-time config resolution. Held
  * in an exported object so tests can reset the once-flags between
  * harnesses (each test server re-registers the plugin).
@@ -202,9 +202,9 @@ function pickStripMode(value: unknown): HookConfig['stripMode'] | undefined {
 }
 
 /**
- * File/options config tiers for `resolveHookConfig` (FR-047). Each tier
+ * File/options config tiers for `resolveHookConfig` (FR-056). Each tier
  * is a validated `SupervisorFileConfig` subset; `derivedModel` carries
- * the OpenCode-config-derived model (FR-049) and applies to
+ * the OpenCode-config-derived model (FR-058) and applies to
  * `auditorModel` only.
  */
 export interface SupervisorConfigSources {
@@ -226,7 +226,7 @@ const tiered = <T>(...values: (T | undefined)[]): T | undefined =>
  * Resolves the effective hook-layer configuration with precedence
  * session plugin config → environment → project file → plugin options
  * → global file → derived model (auditorModel only) → `pluginConfig`
- * defaults (FR-047). `resolveAuditorConfig` owns the session/env/model
+ * defaults (FR-056). `resolveAuditorConfig` owns the session/env/model
  * base tiers; the file and options tiers are validated subsets supplied
  * by the caller. `??` rather than `||` throughout: `false` and `0` are
  * meaningful settings and must not fall through to the defaults.
@@ -240,13 +240,13 @@ const tiered = <T>(...values: (T | undefined)[]): T | undefined =>
  * unit tests. The documented runtime chain is environment → files →
  * options → derived → defaults.
  *
- * @param sources File/options config tiers (validated by `src/config-file.ts`).
  * @param session Optional session object carrying plugin config overrides.
+ * @param sources File/options config tiers (validated by `src/config-file.ts`).
  * @returns The resolved hook-layer configuration.
  */
 export function resolveHookConfig(
-  sources: SupervisorConfigSources = {},
-  session?: SessionWithPluginConfig
+  session?: SessionWithPluginConfig,
+  sources: SupervisorConfigSources = {}
 ): HookConfig {
   const overrides = sessionOverrides(session);
   const memoOverrides = memoLimitOverrides(overrides.memoLimits);
@@ -660,10 +660,18 @@ function extractResponseText(parts: readonly SessionPromptPart[] | undefined): s
  *
  * @param client The plugin input's OpenCode HTTP client.
  * @param directory The project directory scoping the side session.
- * @param logger The plugin logger (server log, FR-043).
+ * @param logger The plugin logger (server log, FR-052).
  * @returns The InvokeModel function driving the auditor side session.
  */
-export function createInvokeModel(client: PluginInput['client'], directory: string, logger: PluginLogger): InvokeModel {
+export function createInvokeModel(client: PluginInput['client'], directory: string, logger?: PluginLogger): InvokeModel {
+  // Review round 2 (additive signature): the logger is optional so
+  // 2-arg callers from 2.4.0 keep working — without one, delete
+  // failures fall back to silence rather than throwing.
+  const log = logger ?? {
+    info: () => undefined,
+    warn: () => undefined,
+    error: () => undefined,
+  };
   return async (prompt: string, config: AuditConfig): Promise<string> => {
     if (config.auditorModel === undefined) {
       throw new Error('no auditor model configured');
@@ -694,10 +702,10 @@ export function createInvokeModel(client: PluginInput['client'], directory: stri
       try {
         const deleted = await client.session.delete({ path: { id: auditorSessionID } });
         if (deleted.error !== undefined && deleted.error !== null) {
-          logger.error(responseFailure('auditor side session delete failed', deleted));
+          log.error(responseFailure('auditor side session delete failed', deleted));
         }
       } catch (error) {
-        logger.error(`auditor side session delete failed open: ${errorText(error)}`);
+        log.error(`auditor side session delete failed open: ${errorText(error)}`);
       }
     };
     try {
@@ -822,7 +830,7 @@ function critiqueMessage(critique: string): string {
  * events, an accepted fail-open gap (spike 1.2).
  *
  * @param client The plugin input's OpenCode HTTP client.
- * @param logger The plugin logger (server log, FR-043).
+ * @param logger The plugin logger (server log, FR-052).
  * @returns The delivery function the event hook awaits per failed audit.
  */
 function createCritiqueDelivery(client: PluginInput['client'], logger: PluginLogger): (request: CritiqueDeliveryRequest) => Promise<void> {
@@ -954,12 +962,17 @@ function registerMessagesTransform(hooks: Hooks, handler: MessagesTransformHandl
  * `<directory>/.opencode/supervisor/directives/*.md`, sorted by
  * filename for deterministic precedence. A missing directory yields
  * no files silently — directive-less projects keep 2.1.0 behavior —
- * while an unreadable directory or file logs a warning and is
- * skipped (fail-open, FR-032; review round 1: a blanket catch hid
- * per-file failures and dropped the whole set). I/O lives here in
+ * while an unreadable directory or file is skipped with a returned
+ * warning (fail-open, FR-032; review round 1: a blanket catch hid
+ * per-file failures and dropped the whole set; review round 2: the
+ * warnings are RETURNED rather than logged, so the caller can defer
+ * them past the bootstrap listener-down window). I/O lives here in
  * the hook layer (design D3); parsing is pure in src/directives.ts.
  */
-const loadDirectiveFiles = (directory: string, logger: PluginLogger): { name: string; content: string }[] => {
+const loadDirectiveFiles = (
+  directory: string
+): { files: { name: string; content: string }[]; warnings: string[] } => {
+  const warnings: string[] = [];
   const directivesDir = path.join(directory, '.opencode', 'supervisor', 'directives');
   let entries;
   try {
@@ -968,9 +981,9 @@ const loadDirectiveFiles = (directory: string, logger: PluginLogger): { name: st
     // ENOENT = no directives configured (expected, stays silent);
     // anything else is a real read problem worth surfacing.
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-      logger.warn(`directive directory unreadable (${errorText(error)}); no file directives loaded`);
+      warnings.push(`directive directory unreadable (${errorText(error)}); no file directives loaded`);
     }
-    return [];
+    return { files: [], warnings };
   }
   // Codepoint sort (review round 1): localeCompare depends on the
   // ambient locale, which made memo order and cap survival
@@ -986,10 +999,10 @@ const loadDirectiveFiles = (directory: string, logger: PluginLogger): { name: st
         content: fs.readFileSync(path.join(directivesDir, entry.name), 'utf8'),
       });
     } catch (error) {
-      logger.warn(`directive file '${entry.name}' unreadable (${errorText(error)}); skipped`);
+      warnings.push(`directive file '${entry.name}' unreadable (${errorText(error)}); skipped`);
     }
   }
-  return files;
+  return { files, warnings };
 };
 
 /**
@@ -1055,6 +1068,45 @@ const readBoundedFile = (
   }
 };
 
+/**
+ * Lexically normalize an extracted path token (FR-061): backslashes
+ * fold to slashes, `.` and empty segments drop, `..` pops its parent,
+ * and matching folds to lowercase. Traversal spellings
+ * (`.opencode/supervisor/../supervisor/config.json`) collapse onto
+ * the protected path so suffix matching cannot be dodged.
+ */
+const normalizePathToken = (token: string): string => {
+  const segments: string[] = [];
+  for (const segment of token.replaceAll('\\', '/').split('/')) {
+    if (segment === '' || segment === '.') {
+      continue;
+    }
+    if (segment === '..') {
+      segments.pop();
+      continue;
+    }
+    segments.push(segment.toLowerCase());
+  }
+  return segments.join('/');
+};
+
+/**
+ * True when the normalized path contains `run` as a consecutive
+ * segment run (FR-061) — `a/directives-backup/b` does not match a
+ * `opencode/supervisor/directives` run, but every path inside or
+ * equal to that directory does.
+ */
+const hasProtectedSegmentRun = (normalized: string, run: string): boolean => {
+  const needle = run.split('/');
+  const segments = normalized.split('/');
+  for (let i = 0; i + needle.length <= segments.length; i += 1) {
+    if (needle.every((segment, j) => segments[i + j] === segment)) {
+      return true;
+    }
+  }
+  return false;
+};
+
 const readApprovals = (directory: string): { records: ApprovalRecord[]; error: string | null } => {
   const approvalsPath = path.join(directory, '.opencode', 'supervisor', 'approvals.json');
   // Bounded read (FR-045): a planted oversized file fails closed
@@ -1067,7 +1119,7 @@ const readApprovals = (directory: string): { records: ApprovalRecord[]; error: s
 };
 
 /**
- * Reads one supervisor config file (FR-048), mirroring `readApprovals`:
+ * Reads one supervisor config file (FR-057), mirroring `readApprovals`:
  * a size-bounded read (a planted oversized file is skipped with an
  * error rather than stalling the event loop), an absent file is simply
  * absent (absence is the unconfigured state, not an error), and any
@@ -1087,7 +1139,7 @@ const readSupervisorConfigFile = (configPath: string): ParsedSupervisorConfig =>
 };
 
 /**
- * Resolves the global user-level config path (FR-048):
+ * Resolves the global user-level config path (FR-057):
  * `${XDG_CONFIG_HOME}/opencode/supervisor/config.json`, falling back to
  * `~/.config/opencode/supervisor/config.json` when XDG_CONFIG_HOME is
  * unset or empty.
@@ -1120,15 +1172,15 @@ const globalSupervisorConfigPath = (): string => {
  * @param options Tuple-registration options (`[path, options]` in the
  *   `plugin` array): `options.directives` appends engineer directives
  *   after the file sources (FR-026), and `options.config` carries the
- *   options config tier (FR-047).
+ *   options config tier (FR-056).
  * @returns The registered hooks.
  */
 const server = async (input: PluginInput, options?: PluginOptions): Promise<Hooks> => {
-  // FR-043: every plugin log line routes through the server log. The
+  // FR-052: every plugin log line routes through the server log. The
   // plugin runs inside the OpenCode server process, whose stdout/stderr
   // is the TUI terminal — console calls corrupt the display; the /log
   // endpoint files entries under the 'opencode-supervisor' service tag
-  // instead. Fire-and-forget (FR-044): a listener that is not up yet at
+  // instead. Fire-and-forget (FR-053): a listener that is not up yet at
   // bootstrap absorbs the loss.
   const logger = createPluginLogger(input.client);
   // Engineer console (FR-026..FR-032): directives are static policy
@@ -1139,7 +1191,7 @@ const server = async (input: PluginInput, options?: PluginOptions): Promise<Hook
   // (FR-032): unreadable directories yield no files, malformed files
   // and invalid rules degrade to warnings, and the combined set is
   // bounded to MAX_DIRECTIVES.
-  const directiveFiles = loadDirectiveFiles(input.directory, logger);
+  const { files: directiveFiles, warnings: directiveFileWarnings } = loadDirectiveFiles(input.directory);
   const parsedFiles = parseDirectives(directiveFiles);
   const parsedOptions = parseOptionsDirectives(options?.directives);
   const allDirectives = [...parsedFiles.directives, ...parsedOptions.directives];
@@ -1161,17 +1213,18 @@ const server = async (input: PluginInput, options?: PluginOptions): Promise<Hook
   const directivesAdvisory = renderDirectivesAdvisory(directives);
   // Deferred bootstrap warnings (review round 1, MEDIUM): warnings
   // collected during server() fire into the listener-down window,
-  // where fire-and-forget delivery (FR-044) loses them and dedupe
-  // (FR-045) would suppress the repeat. They queue here and flush at
+  // where fire-and-forget delivery (FR-053) loses them and dedupe
+  // (FR-054) would suppress the repeat. They queue here and flush at
   // first-hook time in `buildConfig` — the identity-line precedent
   // (design D3), when the HTTP listener is reliably up.
   const bootstrapWarnings = [
+    ...directiveFileWarnings,
     ...directiveWarnings,
     ...compileWarnings,
     ...gateWarnings,
   ];
   let bootstrapFlushed = false;
-  // FR-048: file config tiers, read once per plugin start. An absent
+  // FR-057: file config tiers, read once per plugin start. An absent
   // file is the unconfigured state (silent); a present-but-invalid
   // file is skipped with one warning — the tier dissolves, lower tiers
   // and defaults remain in effect (fail-open, mirroring FR-032).
@@ -1185,7 +1238,7 @@ const server = async (input: PluginInput, options?: PluginOptions): Promise<Hook
   if (globalFile.error !== null) {
     bootstrapWarnings.push(`global supervisor config file ignored: ${globalFile.error}`);
   }
-  // FR-047 options tier: `options.config` from tuple registration,
+  // FR-056 options tier: `options.config` from tuple registration,
   // validated like the file tiers (a wrong-typed value rejects the
   // whole tier with one warning).
   const optionsParsed = validateSupervisorConfig(
@@ -1195,35 +1248,60 @@ const server = async (input: PluginInput, options?: PluginOptions): Promise<Hook
     bootstrapWarnings.push(`plugin options supervisor config ignored: ${optionsParsed.error}`);
   }
   const optionsConfig = optionsParsed.config;
-  // FR-049 derived tier: the OpenCode config's model (small_model
+  // FR-058 derived tier: the OpenCode config's model (small_model
   // preferred) when no earlier tier set one. Lazy and memoized on
   // success only — a failed lookup (the server's HTTP listener may
   // not be up yet at plugin load) is retried on the next resolution.
+  // Review round 2 (MEDIUM): the lookup is bounded by a timeout so a
+  // hanging endpoint cannot stall every hook, and a persistently
+  // failing endpoint is retried with a backoff instead of on every
+  // hook — eventual consistency, bounded work.
+  const DERIVED_LOOKUP_TIMEOUT_MS = 5000;
+  const DERIVED_LOOKUP_FAILURE_BUDGET = 5;
+  const DERIVED_LOOKUP_BACKOFF_MS = 60000;
   let derivedModel: string | undefined;
   let derivedModelResolved = false;
   let derivedLookupFailed = false;
+  let derivedConsecutiveFailures = 0;
+  let derivedNextAttemptAt = 0;
   const resolveDerivedModel = async (): Promise<string | undefined> => {
     if (derivedModelResolved) {
       return derivedModel;
     }
+    if (derivedConsecutiveFailures >= DERIVED_LOOKUP_FAILURE_BUDGET && Date.now() < derivedNextAttemptAt) {
+      derivedLookupFailed = true;
+      return derivedModel;
+    }
     try {
-      const response = await input.client.config.get({ query: { directory: input.directory } });
+      const response = await Promise.race([
+        input.client.config.get({ query: { directory: input.directory } }),
+        new Promise<never>((_, reject) => {
+          const timer = setTimeout(() => reject(new Error('config.get timed out')), DERIVED_LOOKUP_TIMEOUT_MS);
+          timer.unref?.();
+        }),
+      ]);
       const model = response.data?.small_model ?? response.data?.model;
       if (typeof model === 'string' && model.trim() !== '') {
         derivedModel = model;
       }
       derivedModelResolved = true;
       derivedLookupFailed = false;
+      derivedConsecutiveFailures = 0;
     } catch {
-      // The listener may be down (bootstrap); retry on the next call.
+      // The listener may be down (bootstrap); retry on the next call —
+      // but after a run of consecutive failures, back off first.
       derivedLookupFailed = true;
+      derivedConsecutiveFailures += 1;
+      if (derivedConsecutiveFailures >= DERIVED_LOOKUP_FAILURE_BUDGET) {
+        derivedNextAttemptAt = Date.now() + DERIVED_LOOKUP_BACKOFF_MS;
+      }
     }
     return derivedModel;
   };
-  // Per-use config resolution (FR-047): every hook resolves the
+  // Per-use config resolution (FR-056): every hook resolves the
   // effective config through this builder, applying the file/options
   // tiers and, when no earlier tier set a model, the derived tier.
-  // Also carries the identity line (FR-046): logged once per process
+  // Also carries the identity line (FR-055): logged once per process
   // on the FIRST hook-time resolution — by then the HTTP listener is
   // up, so the line reliably reaches the server log (a load-time
   // attempt could fire before the listener existed).
@@ -1232,12 +1310,15 @@ const server = async (input: PluginInput, options?: PluginOptions): Promise<Hook
       project: projectFile.config,
       global: globalFile.config,
       options: optionsConfig,
+      // Review round 2 (LOW): seeding the memoized derived model
+      // keeps the steady state to a single resolution pass per hook.
+      derivedModel: derivedModelResolved ? derivedModel : undefined,
     };
-    let config = resolveHookConfig(sources);
-    if (config.auditorModel === undefined) {
+    let config = resolveHookConfig(undefined, sources);
+    if (config.auditorModel === undefined && !derivedModelResolved) {
       const derived = await resolveDerivedModel();
       if (derived !== undefined) {
-        config = resolveHookConfig({ ...sources, derivedModel: derived });
+        config = resolveHookConfig(undefined, { ...sources, derivedModel: derived });
       }
     }
     // Deferred bootstrap warnings (review round 1, MEDIUM): flush on
@@ -1293,7 +1374,7 @@ const server = async (input: PluginInput, options?: PluginOptions): Promise<Hook
         logger.warn('LLM peer audit disabled: no auditor model configured (deterministic invariants remain active)');
       }
     } else if (logIdentityState.identitySaidNoModel) {
-      // Review round 1 (MEDIUM): a late-resolving model (the FR-049
+      // Review round 1 (MEDIUM): a late-resolving model (the FR-058
       // retry path) must not leave the frozen 'none' as the last
       // word — the enabling is announced.
       logIdentityState.identitySaidNoModel = false;
@@ -1501,25 +1582,41 @@ const server = async (input: PluginInput, options?: PluginOptions): Promise<Hook
         ) {
           // FR-044: the approvals file is engineer-authored state;
           // agent tool calls touching it are blocked by default.
-          // Review round 1 (HIGH): the supervisor config files share
-          // that trust class — they carry the guard's enforcement
-          // toggles and the auditor model, so an agent that could
-          // write one could silently defang its own supervisor
-          // across restarts. Both the project file
-          // (<dir>/.opencode/supervisor/config.json) and the global
-          // one (~/.config/opencode/supervisor/config.json) end with
-          // the protected suffix.
+          // Review rounds 1-2 (HIGH, FR-061): the supervisor config
+          // files and the directives directory share that trust
+          // class — they carry the guard's enforcement toggles, the
+          // auditor model, and the enforce/approve/review rules, so
+          // an agent that could write them could defang its own
+          // supervisor across restarts. The check pairs two lenses
+          // so evasion spellings cannot slip past either: extracted
+          // path tokens are lexically normalized before segment-run
+          // matching (traversal collapses), and the raw serialized
+          // arguments are scanned for the protected names — catching
+          // slash-free spellings (`cd .opencode/supervisor && cat
+          // config.json`) the path extractor cannot tokenize. Block
+          // reasons name the protected object for the engineer,
+          // never the spelling the agent used.
+          const rawArgsLower = JSON.stringify(output.args ?? {}).toLowerCase();
+          const normalizedArgPaths = argPaths.map(normalizePathToken);
           let protectedStateReason: string | null = null;
-          if (argPaths.some((argPath) => (argPath.split('/').pop() || '').toLowerCase() === 'approvals.json')) {
+          if (
+            normalizedArgPaths.some((p) => p.endsWith('approvals.json')) ||
+            rawArgsLower.includes('approvals.json')
+          ) {
             protectedStateReason =
               'the approvals file is engineer-authored state; the supervised agent may not touch it (engineer approval gates depend on it). Ask the engineer to update .opencode/supervisor/approvals.json.';
           } else if (
-            argPaths.some((argPath) =>
-              argPath.replaceAll('\\', '/').toLowerCase().endsWith('opencode/supervisor/config.json')
-            )
+            normalizedArgPaths.some((p) => hasProtectedSegmentRun(p, 'opencode/supervisor/config.json')) ||
+            (rawArgsLower.includes('supervisor') && rawArgsLower.includes('config.json'))
           ) {
             protectedStateReason =
               'the supervisor config file is engineer-authored state; the supervised agent may not touch it (tool-guard toggles and the auditor model depend on it). Ask the engineer to edit the supervisor config.json directly.';
+          } else if (
+            normalizedArgPaths.some((p) => hasProtectedSegmentRun(p, 'opencode/supervisor/directives')) ||
+            (rawArgsLower.includes('supervisor') && rawArgsLower.includes('directives'))
+          ) {
+            protectedStateReason =
+              'the supervisor directives are engineer-authored state; the supervised agent may not touch them (enforcement rules and gates depend on them). Ask the engineer to edit the directives directory directly.';
           }
           if (protectedStateReason !== null) {
             verification = {
