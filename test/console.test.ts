@@ -42,6 +42,10 @@ function mockPluginInput(): PluginInput {
         abort: async () => ({}),
         delete: async () => ({}),
       },
+      // FR-043/FR-049: the hook layer logs through /log and derives the
+      // auditor model from the OpenCode config — the mock provides both.
+      app: { log: async () => ({}) },
+      config: { get: async () => ({ data: { small_model: 'mock/derived-model' } }) },
     },
     directory: '/tmp/supervisor-test',
   } as unknown as PluginInput;
@@ -163,6 +167,8 @@ function auditInput(response: string): { input: PluginInput; calls: Record<strin
           return {};
         },
       },
+      app: { log: async () => ({}) },
+      config: { get: async () => ({ data: { small_model: 'mock/derived-model' } }) },
     },
     directory: '/tmp/supervisor-test',
   };
@@ -591,6 +597,8 @@ test('console tools return an inert result in auditor side sessions', async () =
             return {};
           },
         },
+        app: { log: async () => ({}) },
+        config: { get: async () => ({ data: { small_model: 'mock/derived-model' } }) },
       },
       directory: '/tmp/supervisor-test',
     };

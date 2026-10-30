@@ -11,6 +11,7 @@ import {
 } from '../src/auditor.ts';
 import { verifyToolIntent } from '../src/tool-guard.ts';
 import { DEFAULT_MEMO_LIMITS } from '../src/memo.ts';
+import type { PluginLogger } from '../src/plugin-log.ts';
 
 test('stripNarrative isolates code and math steps', () => {
   const steps = [
@@ -25,7 +26,7 @@ test('stripNarrative isolates code and math steps', () => {
 test('resolveAuditorConfig respects session model slug and variant overrides', () => {
   const resolved = resolveAuditorConfig(
     {
-      auditorModel: 'google/gemini-3.8-flash',
+      auditorModel: 'mock/auditor-model',
       auditorVariant: 'low',
       stripMode: 'code_and_math',
       maxRegenerations: 2,
@@ -48,13 +49,18 @@ test('resolveAuditorConfig respects session model slug and variant overrides', (
 });
 
 const baseAuditConfig: AuditConfig = {
-  auditorModel: 'google/gemini-3.8-flash',
+  auditorModel: 'mock/auditor-model',
   auditorVariant: 'low',
   stripMode: 'code_and_math',
   maxRegenerations: 2,
   blockRewardHacking: true,
   requireStepReferenceInTools: true,
 };
+
+// FR-043: createInvokeModel logs delete failures through the plugin
+// logger — a silent stand-in keeps these adapter tests focused on the
+// side-session call contract.
+const stubLogger: PluginLogger = { info: () => {}, warn: () => {}, error: () => {} };
 
 // Tripwire mock: any call flips the outcome to fail-open, failing the test.
 const neverInvokeModel: InvokeModel = async () => {
@@ -332,9 +338,39 @@ function mockPluginInput(): PluginInput {
         abort: async () => ({}),
         delete: async () => ({}),
       },
+      // FR-043/FR-049: the hook layer logs through /log and derives the
+      // auditor model from the OpenCode config — the mock provides both.
+      app: { log: async () => ({}) },
+      config: { get: async () => ({ data: { small_model: 'mock/derived-model' } }) },
     },
     directory: '/tmp/supervisor-test',
   } as unknown as PluginInput;
+}
+
+/** A plugin input whose app.log records entries, for log-routing tests (FR-043). */
+function recordingPluginInput(): { input: PluginInput; logEntries: Array<{ level: string; message: string }> } {
+  const logEntries: Array<{ level: string; message: string }> = [];
+  const input = {
+    client: {
+      session: {
+        create: async () => ({ data: { id: 'mock-side-session' } }),
+        prompt: async () => ({ data: { info: {}, parts: [] } }),
+        promptAsync: async () => ({}),
+        abort: async () => ({}),
+        delete: async () => ({}),
+      },
+      app: {
+        log: async (options: unknown) => {
+          const body = (options as { body?: { level?: string; message?: string } }).body;
+          logEntries.push({ level: body?.level ?? '', message: body?.message ?? '' });
+          return {};
+        },
+      },
+      config: { get: async () => ({ data: { small_model: 'mock/derived-model' } }) },
+    },
+    directory: '/tmp/supervisor-test',
+  };
+  return { input: input as unknown as PluginInput, logEntries };
 }
 
 test('plugin module imports cleanly and exports the PluginModule entry', async () => {
@@ -375,7 +411,7 @@ test('resolveHookConfig resolves hook knobs session → environment → defaults
 
   try {
     // Session plugin config wins, including meaningful falsy values.
-    const fromSession = resolveHookConfig({
+    const fromSession = resolveHookConfig({}, {
       config: {
         plugins: {
           'opencode-supervisor': {
@@ -414,8 +450,10 @@ test('resolveHookConfig resolves hook knobs session → environment → defaults
       delete process.env[name];
     }
     const fromDefaults = resolveHookConfig();
-    assert.equal(fromDefaults.auditorModel, 'google/gemini-3.8-flash');
-    assert.equal(fromDefaults.auditorVariant, 'low');
+    // FR-050: no hardcoded model default — the auditor resolves from the
+    // tiers or stays unset (LLM audit disabled, invariants only).
+    assert.equal(fromDefaults.auditorModel, undefined);
+    assert.equal(fromDefaults.auditorVariant, undefined);
     assert.equal(fromDefaults.maxRegenerations, 2);
     assert.equal(fromDefaults.blockRewardHacking, true);
     assert.equal(fromDefaults.requireStepReferenceInTools, true);
@@ -516,20 +554,20 @@ test('createInvokeModel drives a dedicated auditor side session and returns its 
     },
   });
 
-  const invokeModel = createInvokeModel(client, '/workdir');
+  const invokeModel = createInvokeModel(client, '/workdir', stubLogger);
   const text = await invokeModel('Audit these steps.', baseAuditConfig);
 
   // Lenient extraction: non-ignored text parts joined, others skipped.
   assert.equal(text, 'Audit complete.\n\n{"passed":true}');
 
   assert.equal(calls.create.length, 1);
-  assert.equal(calls.create[0].body.title, 'supervisor-audit @ google/gemini-3.8-flash (low)');
+  assert.equal(calls.create[0].body.title, 'supervisor-audit @ mock/auditor-model (low)');
   assert.equal(calls.create[0].query.directory, '/workdir');
   assert.equal(calls.create[0].body.parentID, undefined); // FR-004: not parented to a supervised session
   assert.equal(calls.prompt.length, 1);
   assert.equal(calls.prompt[0].path.id, 'auditor-side-1');
   assert.equal(calls.prompt[0].query.directory, '/workdir');
-  assert.deepEqual(calls.prompt[0].body.model, { providerID: 'google', modelID: 'gemini-3.8-flash' });
+  assert.deepEqual(calls.prompt[0].body.model, { providerID: 'mock', modelID: 'auditor-model' });
   assert.equal(calls.prompt[0].body.variant, 'low');
   assert.deepEqual(calls.prompt[0].body.parts, [{ type: 'text', text: 'Audit these steps.' }]);
 
@@ -549,7 +587,7 @@ test('createInvokeModel deletes the auditor side session and fails open when del
   // The delete rejection is logged and swallowed (fail-open): the audit
   // text is already secured before deletion runs, so the invocation
   // still resolves with it.
-  const text = await createInvokeModel(deleteFailed.client, '/workdir')('Audit these steps.', baseAuditConfig);
+  const text = await createInvokeModel(deleteFailed.client, '/workdir', stubLogger)('Audit these steps.', baseAuditConfig);
 
   assert.equal(text, '{"passed":true}');
   assert.equal(deleteFailed.calls.delete.length, 1);
@@ -567,7 +605,7 @@ test('createInvokeModel deletes the side session when the prompt transport rejec
   // error is rethrown, preserving the fail-open rejection contract
   // (FR-005) that runPeerAudit relies on.
   await assert.rejects(
-    createInvokeModel(promptFailed.client, '/workdir')('Audit these steps.', baseAuditConfig),
+    createInvokeModel(promptFailed.client, '/workdir', stubLogger)('Audit these steps.', baseAuditConfig),
     /prompt transport down/
   );
   assert.equal(promptFailed.calls.delete.length, 1);
@@ -577,13 +615,13 @@ test('createInvokeModel deletes the side session when the prompt transport rejec
 test('createInvokeModel rejects on adapter failures so runPeerAudit fails open', async () => {
   const noSession = auditorClientMock({ createData: {} });
   await assert.rejects(
-    createInvokeModel(noSession.client, '/workdir')('prompt', baseAuditConfig),
+    createInvokeModel(noSession.client, '/workdir', stubLogger)('prompt', baseAuditConfig),
     /auditor side session create failed/
   );
 
   const noPromptData = auditorClientMock({ createData: { id: 'auditor-side-2' } });
   await assert.rejects(
-    createInvokeModel(noPromptData.client, '/workdir')('prompt', baseAuditConfig),
+    createInvokeModel(noPromptData.client, '/workdir', stubLogger)('prompt', baseAuditConfig),
     /auditor side session prompt failed/
   );
 
@@ -592,13 +630,13 @@ test('createInvokeModel rejects on adapter failures so runPeerAudit fails open',
     promptData: { info: { error: { name: 'ApiError' } }, parts: [] },
   });
   await assert.rejects(
-    createInvokeModel(messageError.client, '/workdir')('prompt', baseAuditConfig),
+    createInvokeModel(messageError.client, '/workdir', stubLogger)('prompt', baseAuditConfig),
     /auditor side session message error/
   );
 
   const malformedSlug = auditorClientMock({ createData: { id: 'unused' } });
   await assert.rejects(
-    createInvokeModel(malformedSlug.client, '/workdir')('prompt', {
+    createInvokeModel(malformedSlug.client, '/workdir', stubLogger)('prompt', {
       ...baseAuditConfig,
       auditorModel: 'gemini-flash',
     }),
@@ -760,6 +798,8 @@ function auditHarness(
           return {};
         },
       },
+      app: { log: async () => ({}) },
+      config: { get: async () => ({ data: { small_model: 'mock/derived-model' } }) },
     },
     directory: '/tmp/supervisor-hook-test',
   };
@@ -947,6 +987,8 @@ test('event hook never rejects when the audit client fails (fail-open)', async (
           abort: async () => ({}),
           delete: async () => ({}),
         },
+        app: { log: async () => ({}) },
+        config: { get: async () => ({ data: { small_model: 'mock/derived-model' } }) },
       },
       directory: '/tmp/supervisor-hook-test',
     };
@@ -1595,25 +1637,10 @@ function dispatchToolBefore(hooks: DispatchHooks, sessionID: string, tool: strin
 }
 
 /**
- * Captures console.error lines while `run` executes, restoring the
- * original function in finally. The file has no prior log-capture
- * convention; spike 1.3 (the host never logs trigger failures, so the
- * plugin's own block log is the block's only trace) makes that log
- * worth asserting — this helper is the file's first capture.
+ * FR-043 restated for tests: the plugin logs through the server's /log
+ * endpoint (captured by `recordingPluginInput`), never console.* — the
+ * log-routing tests below assert recorded entries instead of stderr.
  */
-async function captureConsoleError(run: () => Promise<void>): Promise<string[]> {
-  const lines: string[] = [];
-  const original = console.error;
-  console.error = (...args: unknown[]) => {
-    lines.push(args.map((arg) => String(arg)).join(' '));
-  };
-  try {
-    await run();
-  } finally {
-    console.error = original;
-  }
-  return lines;
-}
 
 test('tool.execute.before proceeds for any file path when no verified trace exists', async () => {
   await withCleanAuditEnv(async () => {
@@ -1780,7 +1807,8 @@ test('tool guard consumes the live verified trace populated by the event hook', 
 
 test('tool.execute.before fails open when the guard infrastructure throws', async () => {
   await withCleanAuditEnv(async () => {
-    const hooks = await plugin.server(mockPluginInput());
+    const { input, logEntries } = recordingPluginInput();
+    const hooks = await plugin.server(input);
     const sessionID = 'guard-corrupted-state';
     const state = sessionState.get(sessionID);
     // Corrupted state entry: a non-array verifiedSteps makes
@@ -1788,12 +1816,11 @@ test('tool.execute.before fails open when the guard infrastructure throws', asyn
     // proceed; a guard crash must never block or break the session.
     (state as { verifiedSteps: string[] | null }).verifiedSteps = null;
 
-    const lines = await captureConsoleError(async () => {
-      await assert.doesNotReject(() =>
-        dispatchToolBefore(hooks, sessionID, 'bash', { command: 'cat src/anything.ts' })
-      );
-    });
-    assert.ok(lines.some((line) => line.includes('tool guard failed open')));
+    await assert.doesNotReject(() =>
+      dispatchToolBefore(hooks, sessionID, 'bash', { command: 'cat src/anything.ts' })
+    );
+    // FR-043: the fail-open trace rides the server log, not stderr.
+    assert.ok(logEntries.some((entry) => entry.level === 'error' && entry.message.includes('tool guard failed open')));
 
     // Drop the corrupted entry so nothing later observes it.
     sessionState.cleanup(sessionID);
@@ -1802,21 +1829,25 @@ test('tool.execute.before fails open when the guard infrastructure throws', asyn
 
 test('tool.execute.before logs every block with the reason before throwing', async () => {
   await withCleanAuditEnv(async () => {
-    const hooks = await plugin.server(mockPluginInput());
+    const { input, logEntries } = recordingPluginInput();
+    const hooks = await plugin.server(input);
     const sessionID = 'guard-block-log';
     sessionState.get(sessionID).verifiedSteps.push('Edit src/a.ts to export the helper.');
 
-    // Spike 1.3: the host does not log trigger failures, so the
-    // plugin's own console.error is the block's only trace.
-    const lines = await captureConsoleError(async () => {
-      await assert.rejects(
-        () => dispatchToolBefore(hooks, sessionID, 'write', { filePath: 'src/b.ts', content: 'export const y = 2;' }),
-        /Execution blocked/
-      );
-    });
+    // Spike 1.3, restated for FR-043: the host does not log trigger
+    // failures, so the plugin's own server-log entry is the block's
+    // only trace.
+    await assert.rejects(
+      () => dispatchToolBefore(hooks, sessionID, 'write', { filePath: 'src/b.ts', content: 'export const y = 2;' }),
+      /Execution blocked/
+    );
     assert.ok(
-      lines.some(
-        (line) => line.includes('blocked tool') && line.includes('src/b.ts') && line.includes('file-path trace check')
+      logEntries.some(
+        (entry) =>
+          entry.level === 'error' &&
+          entry.message.includes('blocked tool') &&
+          entry.message.includes('src/b.ts') &&
+          entry.message.includes('file-path trace check')
       )
     );
   });
@@ -1917,6 +1948,8 @@ test("hooks ignore the plugin's own auditor side sessions (self-suppression)", a
             return {};
           },
         },
+        app: { log: async () => ({}) },
+        config: { get: async () => ({ data: { small_model: 'mock/derived-model' } }) },
       },
       directory: '/tmp/supervisor-hook-test',
     };

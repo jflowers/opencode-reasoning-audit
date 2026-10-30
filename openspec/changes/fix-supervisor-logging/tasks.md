@@ -2,7 +2,7 @@
 
 ## 1. Spec artifacts
 
-- [ ] 1.1 [P] Write `proposal.md`, `design.md`,
+- [x] 1.1 [P] Write `proposal.md`, `design.md`,
   `specs/supervisor-logging/spec.md` (FR-043..FR-046),
   `specs/auditor-config/spec.md` (FR-047..FR-051), and this
   `tasks.md`. Verify: every scenario carries GIVEN/WHEN/THEN; RFC
@@ -10,13 +10,13 @@
 
 ## 2. Logging (Change B)
 
-- [ ] 2.1 [P] Implement `src/plugin-log.ts`: `createPluginLogger`
+- [x] 2.1 [P] Implement `src/plugin-log.ts`: `createPluginLogger`
   returning `{ info, warn, error }` over `client.app.log`, service
   `opencode-supervisor`, fire-and-forget `.catch(() => {})`,
   per-logger dedupe of warn/error by `level:message`, info never
   deduped (FR-043..FR-045). Verify: module has no direct I/O and
   no console usage.
-- [ ] 2.2 [P] Thread the logger through `index.ts`: create it in
+- [x] 2.2 [P] Thread the logger through `index.ts`: create it in
   `server()`, pass into `createInvokeModel`,
   `createCritiqueDelivery`, and `loadDirectiveFiles`; replace all
   twenty `console.*` sites; move the identity line to the first
@@ -25,22 +25,22 @@
 
 ## 3. Auditor configuration (Change A)
 
-- [ ] 3.1 [P] Implement `src/config-file.ts` as a pure module:
+- [x] 3.1 [P] Implement `src/config-file.ts` as a pure module:
   `SupervisorFileConfig` shape, `validateSupervisorConfig` for
   objects (unknown keys ignored, type-invalid values reject),
   `parseSupervisorConfigFile` for raw text (FR-048). Verify: module
   has no clock, randomness, or IO.
-- [ ] 3.2 [P] Wire file + options tiers into `index.ts`:
+- [x] 3.2 [P] Wire file + options tiers into `index.ts`:
   `readSupervisorConfigFile` mirroring `readApprovals`
   (size-bounded, ENOENT absent, skip + warn once), project and
   XDG-global paths, `config` key on plugin tuple options, and the
   per-knob precedence chain session → env → project → options →
   global → derived → default (FR-047, FR-048).
-- [ ] 3.3 [P] Implement the derived tier: lazy `client.config.get`
+- [x] 3.3 [P] Implement the derived tier: lazy `client.config.get`
   lookup preferring `small_model` then `model`, memoized on success
   only, inside a per-`server()` `buildConfig()` helper used by
   every hook (FR-049).
-- [ ] 3.4 [P] Remove the hardcoded model: make
+- [x] 3.4 [P] Remove the hardcoded model: make
   `AuditConfig.auditorModel`/`auditorVariant` optional, drop both
   from `pluginConfig`, omit the variant from the side-session
   prompt and title when unset, and return invariant-only outcomes
@@ -50,20 +50,20 @@
 
 ## 4. Tests
 
-- [ ] 4.1 [P] Write `test/plugin-log.test.ts`: level mapping,
+- [x] 4.1 [P] Write `test/plugin-log.test.ts`: level mapping,
   warn/error dedupe, info never deduped, rejected deliveries never
   throw or reject, no console output (FR-043..FR-045). Verify:
   suite green under `bun test`.
-- [ ] 4.2 [P] Write `test/config-file.test.ts`: parse valid full
+- [x] 4.2 [P] Write `test/config-file.test.ts`: parse valid full
   and subset files, unknown keys ignored, malformed JSON and
   invalid types rejected with an error string, reader behavior for
   absent/oversized files via a temp directory (FR-048). Verify:
   suite green under `bun test`.
-- [ ] 4.3 [P] Add precedence tests: environment over project file
+- [x] 4.3 [P] Add precedence tests: environment over project file
   over options over global file over derived; `small_model`
   preferred over `model`; failed derivation retried (FR-047,
   FR-049). Verify: suite green under `bun test`.
-- [ ] 4.4 [P] Update existing suites: `mockPluginInput` gains
+- [x] 4.4 [P] Update existing suites: `mockPluginInput` gains
   `app.log` and `config.get` mocks; console-capture assertions in
   `audit`, `directives`, and `gates` move to the recorded log
   entries; fixtures asserting the old hardcoded default and
@@ -72,7 +72,7 @@
 
 ## 5. Verification and docs
 
-- [ ] 5.1 Update `package.json` `test:node` and AGENTS.md if new
+- [x] 5.1 Update `package.json` `test:node` and AGENTS.md if new
   test files require it; add `test/plugin-log.test.ts` and
   `test/config-file.test.ts` to the Node list. Verify:
   `node --test` runs all eight files green.

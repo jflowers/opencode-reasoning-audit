@@ -5,6 +5,36 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [2.5.0] - 2026-10-30
+
+### Fixed
+
+- The supervisor no longer logs to stdout/stderr. Every diagnostic
+  now routes to the OpenCode server log through the SDK client's
+  `/log` endpoint (service tag `opencode-supervisor`), so
+  `[supervisor]` lines no longer interleave with and corrupt the
+  TUI. Delivery is fire-and-forget with absorbed rejections (a
+  server listener that is not up yet at bootstrap loses only the
+  line), warn/error entries dedupe per message so per-step
+  fail-open loops cannot spray, and the identity line logs once at
+  the first hook invocation (FR-043..FR-046;
+  `openspec/changes/fix-supervisor-logging`).
+
+### Changed
+
+- No hardcoded auditor model. The `google/gemini-3.8-flash` default
+  — a slug most hosts serve no provider for, which made every audit
+  side session fail with `ProviderModelNotFoundError` and silently
+  fail open — is gone. The auditor model now resolves per tier:
+  environment (`OPENCODE_SUPERVISOR_MODEL`) → project
+  `.opencode/supervisor/config.json` → plugin tuple `options.config`
+  → global `${XDG_CONFIG_HOME:-~/.config}/opencode/supervisor/config.json`
+  → the host's OpenCode `small_model`/`model`. With no model
+  anywhere, the LLM audit tier is skipped — deterministic
+  invariants, the tool guard, and the memo remain active — and one
+  warning names the state. The auditor variant is optional and is
+  omitted from the side-session prompt when unset (FR-047..FR-051).
+
 ### Changed
 
 - Memo delivery moved from `experimental.chat.system.transform`
