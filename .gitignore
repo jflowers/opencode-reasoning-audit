@@ -24,3 +24,4 @@ node_modules/
 replicator.log
 cells.json
 node_modules
+opencode.json
