@@ -61,13 +61,16 @@ test('validateSupervisorConfig rejects wrong-typed known keys wholesale', () => 
     [{ auditorModel: '   ' }, /"auditorModel" must be a non-empty string/],
     [{ auditorVariant: 'turbo' }, /"auditorVariant" must be one of/],
     [{ stripMode: 'chaotic' }, /"stripMode" must be one of/],
-    [{ maxRegenerations: -1 }, /"maxRegenerations" must be a non-negative finite number/],
-    [{ maxRegenerations: 'two' }, /"maxRegenerations" must be a non-negative finite number/],
-    [{ maxOnDemandAudits: Number.NaN }, /"maxOnDemandAudits" must be a non-negative finite number/],
+    [{ maxRegenerations: -1 }, /"maxRegenerations" must be a non-negative integer/],
+    [{ maxRegenerations: 'two' }, /"maxRegenerations" must be a non-negative integer/],
+    [{ maxRegenerations: 2.5 }, /"maxRegenerations" must be a non-negative integer/],
+    [{ maxOnDemandAudits: Number.NaN }, /"maxOnDemandAudits" must be a non-negative integer/],
+    [{ maxOnDemandAudits: Number.POSITIVE_INFINITY }, /"maxOnDemandAudits" must be a non-negative integer/],
     [{ blockRewardHacking: 'yes' }, /"blockRewardHacking" must be a boolean/],
     [{ requireStepReferenceInTools: 1 }, /"requireStepReferenceInTools" must be a boolean/],
     [{ memoLimits: [] }, /"memoLimits" must be an object/],
-    [{ memoLimits: { maxReminders: -2 } }, /"memoLimits.maxReminders" must be a non-negative finite number/],
+    [{ memoLimits: { maxReminders: -2 } }, /"memoLimits.maxReminders" must be a non-negative integer/],
+    [{ memoLimits: { maxReminders: 1.5 } }, /"memoLimits.maxReminders" must be a non-negative integer/],
   ];
   for (const [value, pattern] of cases) {
     const parsed = validateSupervisorConfig(value);
@@ -75,6 +78,12 @@ test('validateSupervisorConfig rejects wrong-typed known keys wholesale', () => 
     // A wrong-typed value rejects the whole tier, not just the key.
     assert.deepEqual(parsed.config, {});
   }
+});
+
+test('validateSupervisorConfig trims a whitespace-padded auditorModel slug', () => {
+  const parsed = validateSupervisorConfig({ auditorModel: '  mock/auditor-model  ' });
+  assert.equal(parsed.error, null);
+  assert.equal(parsed.config.auditorModel, 'mock/auditor-model');
 });
 
 test('parseSupervisorConfigFile parses valid JSON and reports malformed JSON', () => {
@@ -108,7 +117,7 @@ const CONFIG_ENV_NAMES = [
   'OPENCODE_SUPERVISOR_MAX_ON_DEMAND_AUDITS',
 ];
 
-/** Cleans every supervisor env knob and log-identity flag around one tier test. */
+/** Cleans every supervisor env knob and log-identity flag, isolating XDG_CONFIG_HOME, around one tier test. */
 async function withCleanConfigEnv(run: () => Promise<void>): Promise<void> {
   const saved: Record<string, string | undefined> = {};
   for (const name of CONFIG_ENV_NAMES) {
@@ -119,6 +128,13 @@ async function withCleanConfigEnv(run: () => Promise<void>): Promise<void> {
   // (FR-055); reset so each tier test's harness observes its own.
   logIdentityState.identityLogged = false;
   logIdentityState.identitySaidNoModel = false;
+  // Isolate the global config tier (review round 5): a real
+  // ~/.config/opencode/supervisor/config.json on the host must not
+  // leak into tier resolution through XDG_CONFIG_HOME. Tests that
+  // set their own XDG root re-isolate on top of this one.
+  const savedXdgHome = process.env.XDG_CONFIG_HOME;
+  const isolatedXdgRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'supervisor-xdg-'));
+  process.env.XDG_CONFIG_HOME = isolatedXdgRoot;
   try {
     await run();
   } finally {
@@ -130,6 +146,12 @@ async function withCleanConfigEnv(run: () => Promise<void>): Promise<void> {
         process.env[name] = value;
       }
     }
+    if (savedXdgHome === undefined) {
+      delete process.env.XDG_CONFIG_HOME;
+    } else {
+      process.env.XDG_CONFIG_HOME = savedXdgHome;
+    }
+    fs.rmSync(isolatedXdgRoot, { recursive: true, force: true });
   }
 }
 
@@ -466,22 +488,28 @@ test('the global config file applies when XDG_CONFIG_HOME is set', async () => {
     path.join(xdgRoot, 'opencode', 'supervisor', 'config.json'),
     '{"auditorModel":"global/file-model"}'
   );
-  const savedXdg = process.env.XDG_CONFIG_HOME;
-  process.env.XDG_CONFIG_HOME = xdgRoot;
   try {
     await withCleanConfigEnv(async () => {
-      const harness = serverHarness(dir, { model: 'derived/unused' });
-      const hooks = await plugin.server(harness.input);
-      await dispatchPart(hooks, completedReasoningPart({ sessionID: 'config-global-session' }));
-      assert.deepEqual(harness.titles, ['supervisor-audit @ global/file-model']);
-      await hooks.dispose!();
+      // Re-isolate on top of the helper's XDG root (review round 5): the
+      // helper points XDG_CONFIG_HOME at an empty temp dir, so this test
+      // swaps in its own populated root while the helper runs.
+      const savedXdg = process.env.XDG_CONFIG_HOME;
+      process.env.XDG_CONFIG_HOME = xdgRoot;
+      try {
+        const harness = serverHarness(dir, { model: 'derived/unused' });
+        const hooks = await plugin.server(harness.input);
+        await dispatchPart(hooks, completedReasoningPart({ sessionID: 'config-global-session' }));
+        assert.deepEqual(harness.titles, ['supervisor-audit @ global/file-model']);
+        await hooks.dispose!();
+      } finally {
+        if (savedXdg === undefined) {
+          delete process.env.XDG_CONFIG_HOME;
+        } else {
+          process.env.XDG_CONFIG_HOME = savedXdg;
+        }
+      }
     });
   } finally {
-    if (savedXdg === undefined) {
-      delete process.env.XDG_CONFIG_HOME;
-    } else {
-      process.env.XDG_CONFIG_HOME = savedXdg;
-    }
     fs.rmSync(dir, { recursive: true, force: true });
     fs.rmSync(xdgRoot, { recursive: true, force: true });
   }

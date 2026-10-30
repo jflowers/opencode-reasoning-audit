@@ -1,9 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import type { Hooks, PluginInput } from '@opencode-ai/plugin';
 import plugin, { createInvokeModel, PLUGIN_VERSION, resolveHookConfig, sessionState } from '../index.ts';
-import { recordingPluginInput, silentPluginInput } from './mocks.ts';
+import { recordingPluginInput, silentClientSurface, silentPluginInput } from './mocks.ts';
 import { stripNarrative } from '../src/stripper.ts';
 import {
   resolveAuditorConfig,
@@ -13,7 +15,7 @@ import {
 } from '../src/auditor.ts';
 import { verifyToolIntent } from '../src/tool-guard.ts';
 import { DEFAULT_MEMO_LIMITS } from '../src/memo.ts';
-import type { PluginLogger } from '../src/plugin-log.ts';
+import { silentPluginLogger } from '../src/plugin-log.ts';
 
 test('stripNarrative isolates code and math steps', () => {
   const steps = [
@@ -60,9 +62,8 @@ const baseAuditConfig: AuditConfig = {
 };
 
 // FR-052: createInvokeModel logs delete failures through the plugin
-// logger — a silent stand-in keeps these adapter tests focused on the
-// side-session call contract.
-const stubLogger: PluginLogger = { info: () => {}, warn: () => {}, error: () => {} };
+// logger — the shared silentPluginLogger keeps these adapter tests
+// focused on the side-session call contract (review round 5).
 
 // Tripwire mock: any call flips the outcome to fail-open, failing the test.
 const neverInvokeModel: InvokeModel = async () => {
@@ -515,7 +516,7 @@ test('createInvokeModel drives a dedicated auditor side session and returns its 
     },
   });
 
-  const invokeModel = createInvokeModel(client, '/workdir', stubLogger);
+  const invokeModel = createInvokeModel(client, '/workdir', silentPluginLogger);
   const text = await invokeModel('Audit these steps.', baseAuditConfig);
 
   // Lenient extraction: non-ignored text parts joined, others skipped.
@@ -548,11 +549,27 @@ test('createInvokeModel deletes the auditor side session and fails open when del
   // The delete rejection is logged and swallowed (fail-open): the audit
   // text is already secured before deletion runs, so the invocation
   // still resolves with it.
-  const text = await createInvokeModel(deleteFailed.client, '/workdir', stubLogger)('Audit these steps.', baseAuditConfig);
+  const text = await createInvokeModel(deleteFailed.client, '/workdir', silentPluginLogger)('Audit these steps.', baseAuditConfig);
 
   assert.equal(text, '{"passed":true}');
   assert.equal(deleteFailed.calls.delete.length, 1);
   assert.deepEqual(deleteFailed.calls.delete[0], { path: { id: 'auditor-side-del' } });
+});
+
+test('createInvokeModel falls back to the shared silent logger when none is passed', async () => {
+  const deleteFailed = auditorClientMock({
+    createData: { id: 'auditor-side-del' },
+    promptData: { info: {}, parts: [{ type: 'text', text: '{"passed":true}' }] },
+    deleteError: new Error('delete transport down'),
+  });
+
+  // Review round 5: 2-arg callers keep the 2.4.0 signature — with no
+  // logger threaded in, the shared silent logger absorbs the delete
+  // rejection and the invocation still resolves with the audit text.
+  const text = await createInvokeModel(deleteFailed.client, '/workdir')('Audit these steps.', baseAuditConfig);
+
+  assert.equal(text, '{"passed":true}');
+  assert.equal(deleteFailed.calls.delete.length, 1);
 });
 
 test('createInvokeModel deletes the side session when the prompt transport rejects', async () => {
@@ -566,7 +583,7 @@ test('createInvokeModel deletes the side session when the prompt transport rejec
   // error is rethrown, preserving the fail-open rejection contract
   // (FR-005) that runPeerAudit relies on.
   await assert.rejects(
-    createInvokeModel(promptFailed.client, '/workdir', stubLogger)('Audit these steps.', baseAuditConfig),
+    createInvokeModel(promptFailed.client, '/workdir', silentPluginLogger)('Audit these steps.', baseAuditConfig),
     /prompt transport down/
   );
   assert.equal(promptFailed.calls.delete.length, 1);
@@ -576,13 +593,13 @@ test('createInvokeModel deletes the side session when the prompt transport rejec
 test('createInvokeModel rejects on adapter failures so runPeerAudit fails open', async () => {
   const noSession = auditorClientMock({ createData: {} });
   await assert.rejects(
-    createInvokeModel(noSession.client, '/workdir', stubLogger)('prompt', baseAuditConfig),
+    createInvokeModel(noSession.client, '/workdir', silentPluginLogger)('prompt', baseAuditConfig),
     /auditor side session create failed/
   );
 
   const noPromptData = auditorClientMock({ createData: { id: 'auditor-side-2' } });
   await assert.rejects(
-    createInvokeModel(noPromptData.client, '/workdir', stubLogger)('prompt', baseAuditConfig),
+    createInvokeModel(noPromptData.client, '/workdir', silentPluginLogger)('prompt', baseAuditConfig),
     /auditor side session prompt failed/
   );
 
@@ -591,13 +608,13 @@ test('createInvokeModel rejects on adapter failures so runPeerAudit fails open',
     promptData: { info: { error: { name: 'ApiError' } }, parts: [] },
   });
   await assert.rejects(
-    createInvokeModel(messageError.client, '/workdir', stubLogger)('prompt', baseAuditConfig),
+    createInvokeModel(messageError.client, '/workdir', silentPluginLogger)('prompt', baseAuditConfig),
     /auditor side session message error/
   );
 
   const malformedSlug = auditorClientMock({ createData: { id: 'unused' } });
   await assert.rejects(
-    createInvokeModel(malformedSlug.client, '/workdir', stubLogger)('prompt', {
+    createInvokeModel(malformedSlug.client, '/workdir', silentPluginLogger)('prompt', {
       ...baseAuditConfig,
       auditorModel: 'gemini-flash',
     }),
@@ -638,13 +655,19 @@ const AUDIT_ENV_NAMES = [
   'OPENCODE_SUPERVISOR_MEMO_MAX_REMINDERS',
 ];
 
-/** Saves/deletes the auditor env knobs around `run`, restoring after. */
+/** Saves/deletes the auditor env knobs and isolates XDG_CONFIG_HOME around `run`, restoring after. */
 async function withCleanAuditEnv(run: () => Promise<void>): Promise<void> {
   const saved: Record<string, string | undefined> = {};
   for (const name of AUDIT_ENV_NAMES) {
     saved[name] = process.env[name];
     delete process.env[name];
   }
+  // Isolate the global config tier (review round 5): a real
+  // ~/.config/opencode/supervisor/config.json on the host must not
+  // leak into tier resolution through XDG_CONFIG_HOME.
+  const savedXdgHome = process.env.XDG_CONFIG_HOME;
+  const isolatedXdgRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'supervisor-xdg-'));
+  process.env.XDG_CONFIG_HOME = isolatedXdgRoot;
   try {
     await run();
   } finally {
@@ -656,6 +679,12 @@ async function withCleanAuditEnv(run: () => Promise<void>): Promise<void> {
         process.env[name] = value;
       }
     }
+    if (savedXdgHome === undefined) {
+      delete process.env.XDG_CONFIG_HOME;
+    } else {
+      process.env.XDG_CONFIG_HOME = savedXdgHome;
+    }
+    fs.rmSync(isolatedXdgRoot, { recursive: true, force: true });
   }
 }
 
@@ -759,8 +788,7 @@ function auditHarness(
           return {};
         },
       },
-      app: { log: async () => ({}) },
-      config: { get: async () => ({ data: { small_model: 'mock/derived-model' } }) },
+      ...silentClientSurface,
     },
     directory: '/tmp/supervisor-hook-test',
   };
@@ -948,8 +976,7 @@ test('event hook never rejects when the audit client fails (fail-open)', async (
           abort: async () => ({}),
           delete: async () => ({}),
         },
-        app: { log: async () => ({}) },
-        config: { get: async () => ({ data: { small_model: 'mock/derived-model' } }) },
+        ...silentClientSurface,
       },
       directory: '/tmp/supervisor-hook-test',
     };
@@ -1909,8 +1936,7 @@ test("hooks ignore the plugin's own auditor side sessions (self-suppression)", a
             return {};
           },
         },
-        app: { log: async () => ({}) },
-        config: { get: async () => ({ data: { small_model: 'mock/derived-model' } }) },
+        ...silentClientSurface,
       },
       directory: '/tmp/supervisor-hook-test',
     };

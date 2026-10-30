@@ -1,5 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import type { Hooks, PluginInput, ToolContext } from '@opencode-ai/plugin';
 import plugin, { sessionState } from '../index.ts';
 import {
@@ -11,7 +14,7 @@ import {
   type Reminder,
 } from '../src/reminders.ts';
 import { buildMemo } from '../src/memo.ts';
-import { silentPluginInput } from './mocks.ts';
+import { silentClientSurface, silentPluginInput } from './mocks.ts';
 
 /** A stored reminder with a fixed timestamp — the module never touches the clock. */
 function reminder(id: string, text: string): Reminder {
@@ -81,13 +84,19 @@ const REMINDER_ENV_NAMES = [
   'OPENCODE_SUPERVISOR_MEMO_MAX_REMINDERS',
 ];
 
-/** Saves/deletes the supervisor env knobs around `run`, restoring after. */
+/** Saves/deletes the supervisor env knobs and isolates XDG_CONFIG_HOME around `run`, restoring after. */
 async function withCleanReminderEnv(run: () => Promise<void>): Promise<void> {
   const saved: Record<string, string | undefined> = {};
   for (const name of REMINDER_ENV_NAMES) {
     saved[name] = process.env[name];
     delete process.env[name];
   }
+  // Isolate the global config tier (review round 5): a real
+  // ~/.config/opencode/supervisor/config.json on the host must not
+  // leak into tier resolution through XDG_CONFIG_HOME.
+  const savedXdgHome = process.env.XDG_CONFIG_HOME;
+  const isolatedXdgRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'supervisor-xdg-'));
+  process.env.XDG_CONFIG_HOME = isolatedXdgRoot;
   try {
     await run();
   } finally {
@@ -99,6 +108,12 @@ async function withCleanReminderEnv(run: () => Promise<void>): Promise<void> {
         process.env[name] = value;
       }
     }
+    if (savedXdgHome === undefined) {
+      delete process.env.XDG_CONFIG_HOME;
+    } else {
+      process.env.XDG_CONFIG_HOME = savedXdgHome;
+    }
+    fs.rmSync(isolatedXdgRoot, { recursive: true, force: true });
   }
 }
 
@@ -356,8 +371,7 @@ test('reminder tools return an inert result in auditor side sessions', async () 
             return {};
           },
         },
-        app: { log: async () => ({}) },
-        config: { get: async () => ({ data: { small_model: 'mock/derived-model' } }) },
+        ...silentClientSurface,
       },
       directory: '/tmp/supervisor-test',
     };

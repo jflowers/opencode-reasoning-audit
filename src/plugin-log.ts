@@ -51,6 +51,18 @@ export const PLUGIN_LOG_SERVICE = 'opencode-supervisor';
  */
 export const PLUGIN_LOG_DEDUPE_CAP = 512;
 
+/**
+ * Shared no-op logger (review round 5): the fallback for optional
+ * logger parameters (createInvokeModel's 2-arg callers) and the
+ * stand-in tests reach for, so silence is declared once instead of
+ * hand-copied at every call site.
+ */
+export const silentPluginLogger: PluginLogger = {
+  info: () => undefined,
+  warn: () => undefined,
+  error: () => undefined,
+};
+
 const createPluginLogger = (
   client: PluginInput['client'],
   service: string = PLUGIN_LOG_SERVICE
@@ -71,8 +83,12 @@ const createPluginLogger = (
       seen.add(key);
     }
     try {
+      // Review round 5: the request body IS a PluginLogEntry — typing
+      // the local keeps the exported interface and the wire shape in
+      // lockstep when either changes.
+      const entry: PluginLogEntry = { service, level, message, extra };
       client
-        .app.log({ body: { service, level, message, extra } })
+        .app.log({ body: entry })
         .catch(() => {});
     } catch {
       // A client without a resolvable app surface, or a synchronously

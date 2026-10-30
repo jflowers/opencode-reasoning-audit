@@ -81,9 +81,10 @@ lives in `index.ts` (`readSupervisorConfigFile`), mirroring
 (`openSync` once, `fstatSync` that descriptor, bound-check, then
 a `readSync` loop — review round 2's `readBoundedFile`, closing
 the stat-then-read TOCTOU). ENOENT is absent, anything else skips
-the file and warns once through the plugin logger. Locations: project `<dir>/.opencode/supervisor/config.json`
-and global `${XDG_CONFIG_HOME ?? ~/.config}/opencode/supervisor/
-config.json`. Resolution stays per-knob — each knob independently
+the file and warns once through the plugin logger. Locations:
+project `<dir>/.opencode/supervisor/config.json` and global
+`${XDG_CONFIG_HOME ?? ~/.config}/opencode/supervisor/config.json`.
+Resolution stays per-knob — each knob independently
 takes the highest tier that sets it — matching the existing
 environment-override semantics: session override → environment →
 project file → plugin options (new `config` key on tuple options,
@@ -102,6 +103,13 @@ a bootstrap-time failure (listener down) leaves the cache empty and
 the next resolution retries (FR-058). The lookup happens inside a
 `buildConfig()` helper bound per `server()` call, so hooks keep
 using a plain resolved `HookConfig`.
+
+Residual (review round 5): the lookup is bounded by a 5s
+timeout and a failure budget — five consecutive failures arm a
+60s backoff — so a hanging endpoint can add up to 5s per
+hook-blocking resolution and ~25s cumulatively before the
+backoff engages. Spec-compliant with FR-058's lazy retry;
+accepted over caching failures.
 
 ### D6: no model means invariants only, not a dead plugin
 
@@ -167,7 +175,10 @@ command string is an executable operation, so mentions there
 are actionable, and each bash call is a fresh process, so a
 cross-call `cd` cannot persist. Residuals: bash heredoc/echo
 prose can false-positive; variable indirection (`cat $CFG`) is
-not caught; accepted — the same residual class as any
+not caught; payload keys beyond the content blocklist (`text`,
+`body`, `document`, `patch`, `diff`, `edits`, `data`) are
+scanned for non-bash tools and can false-positive (fail-closed,
+review round 5); accepted — the same residual class as any
 path-based guard.
 - **Dedupe hides recurring distinct failures**: only identical
   level+message pairs collapse; new messages always surface.

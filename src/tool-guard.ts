@@ -201,17 +201,66 @@ export const normalizePathToken = (token: string): string => {
  * `opencode/supervisor/directives` run, but every path inside or
  * equal to that directory does. A single-segment run is exact
  * segment equality, so `stale-approvals.json` does not match
- * `approvals.json` (review round 4).
+ * `approvals.json` (review round 4). Since review round 5, a segment
+ * carrying shell glob metacharacters matches by glob semantics —
+ * the shell expands `su*ervisor` and `app*vals.json` onto the
+ * protected path at execution time, so exact equality alone was a
+ * bypass.
  */
 export const hasProtectedSegmentRun = (normalized: string, run: string): boolean => {
   const needle = run.split('/');
   const segments = normalized.split('/');
   for (let i = 0; i + needle.length <= segments.length; i += 1) {
-    if (needle.every((segment, j) => segments[i + j] === segment)) {
+    if (needle.every((needleSegment, j) => segmentMatches(segments[i + j], needleSegment))) {
       return true;
     }
   }
   return false;
+};
+
+/**
+ * Compares one normalized path segment against one needle segment
+ * (FR-061, review round 5): exact equality, or — when the segment
+ * carries shell glob metacharacters — glob semantics where `*`
+ * matches within a segment, `?` one character, and `[...]` a
+ * character class.
+ */
+const segmentMatches = (segment: string, needleSegment: string): boolean =>
+  segment === needleSegment || (/[*?[]/.test(segment) && globSegmentToRegExp(segment).test(needleSegment));
+
+/**
+ * Converts a glob-bearing path segment into an anchored regular
+ * expression (review round 5): `*` becomes `[^/]*`, `?` becomes
+ * `[^/]`, and a balanced bracket expression passes through with the
+ * glob negation marker (`!`) translated to `^`. An unterminated
+ * bracket is a literal `[`, as in bash; every other character is
+ * regex-escaped.
+ */
+const globSegmentToRegExp = (segment: string): RegExp => {
+  let pattern = '';
+  for (let i = 0; i < segment.length; i += 1) {
+    const char = segment[i];
+    if (char === '*') {
+      pattern += '[^/]*';
+    } else if (char === '?') {
+      pattern += '[^/]';
+    } else if (char === '[') {
+      const close = segment.indexOf(']', i + 1);
+      if (close === -1) {
+        pattern += '\\[';
+      } else {
+        let body = segment.slice(i + 1, close);
+        if (body.startsWith('!')) {
+          body = `^${body.slice(1)}`;
+        }
+        pattern += `[${body}]`;
+        i = close;
+      }
+    } else {
+      pattern += char.replace(/[.*+?^${}()|[\]\\]/, '\\$&');
+    }
+  }
+  return new RegExp(`^${pattern}$`);
 };
 
 /**
@@ -234,7 +283,8 @@ const CONTENT_ARG_KEYS = ['content', 'oldString', 'newString'];
  * and null when the call is allowed. Two lenses pair so evasion
  * spellings cannot slip past either. The path lens matches
  * lexically normalized tokens (traversal collapses, leading dots
- * fold away); for non-bash tools it scans every argument key
+ * fold away) and glob-bearing segments by glob semantics (review
+ * round 5); for non-bash tools it scans every argument key
  * except the content keys above, so write/edit content is data,
  * never a touch, while custom key names stay covered. The raw
  * lens scans only bash command strings, capped at 64 KiB before
@@ -248,8 +298,9 @@ const CONTENT_ARG_KEYS = ['content', 'oldString', 'newString'];
  *
  * @param toolName The tool being invoked.
  * @param args The tool call arguments.
- * @param argPaths Policy paths extracted from the full arguments
- *   (used directly for bash; other tools are re-filtered here).
+ * @param argPaths Policy paths extracted from the full arguments;
+ *   used as-is for bash (every token is operational) and ignored
+ *   for other tools, which are re-filtered here minus content keys.
  * @returns The block reason, or null when the call is allowed.
  */
 export const checkProtectedState = (
