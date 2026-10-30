@@ -22,6 +22,7 @@
     "bun-types": "latest"
   },
   "dependencies": {
-    "@opencode-ai/plugin": "^1.19.4"
+    "@opencode-ai/plugin": "^1.19.4",
+    "zod": "^4.6.7"
   }
 }
