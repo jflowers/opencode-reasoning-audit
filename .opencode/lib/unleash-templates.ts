@@ -1,9 +1,10 @@
 /**
  * Pure renderers for the /uf.unleash exit and demo output templates.
  *
- * Extracts the prescribed terminal output of /uf.unleash — the eight
- * "## /uf.unleash paused at:" blocks embedded in Steps 1, 4, 5, and 6
- * and the Step 8 (Demo) format block — from command prose into code
+ * Extracts the prescribed terminal output of /uf.unleash — the eleven
+ * "## /uf.unleash paused at:" blocks embedded in tier routing and
+ * Steps 1, 4, 5, and 6 and the Step 8 (Demo) format block — from
+ * command prose into code
  * (OpenSpec change unleash-deterministic-tools, design decision D6), so
  * exits and the demo render identically by construction instead of by
  * re-reading instructions under compressed context.
@@ -32,11 +33,19 @@ export const WORKFLOW_TIERS = ["speckit", "openspec", "quick"] as const
 export type UnleashTier = (typeof WORKFLOW_TIERS)[number]
 
 /**
- * The eight exit scenarios /uf.unleash pauses at, matching the paused-at
+ * The eleven exit scenarios /uf.unleash pauses at, matching the paused-at
  * template blocks in the command. The variant type derives from this list
- * so the two cannot drift apart.
+ * so the two cannot drift apart. Tier routing precedes every numbered
+ * step, so its two variants lead the list in command order; the
+ * planner-failure variant follows because review planning precedes the
+ * review steps it guards (unleash-pipeline-hardening, audit findings
+ * F4/F5/F8: DIRTY_TREE, ROUTE_TIER_TOOLING, and planner INCONCLUSIVE
+ * exits were hand-composed because no variant existed).
  */
 export const UNLEASH_EXIT_VARIANTS = [
+  "tier-routing-dirty-tree",
+  "tier-routing-missing-tooling",
+  "planner-failure",
   "clarify",
   "spec-review",
   "implement-worker-failed",
@@ -49,6 +58,39 @@ export const UNLEASH_EXIT_VARIANTS = [
 
 /** Exit variant identifier — which paused-at scenario to render. */
 export type UnleashExitVariant = (typeof UNLEASH_EXIT_VARIANTS)[number]
+
+/**
+ * Data for the "tier-routing-dirty-tree" exit variant. The route decision
+ * tool rejected the recording because the working tree is dirty — after
+ * the issue resolution and rubric analysis were already spent, so the exit
+ * surfaces the tool's failure message instead of a bare stop.
+ */
+export interface TierRoutingDirtyTreeExitData {
+  /** The uf_unleash_route_decision DIRTY_TREE failure message. */
+  readonly message: string
+}
+
+/**
+ * Data for the "tier-routing-missing-tooling" exit variant. The route
+ * decision tool rejected the recording because the chosen tier's entry
+ * commands are not scaffolded (ROUTE_TIER_TOOLING); its failure message
+ * names the missing paths and the tiers whose entry commands exist.
+ */
+export interface TierRoutingMissingToolingExitData {
+  /** The uf_unleash_route_decision ROUTE_TIER_TOOLING failure message. */
+  readonly message: string
+}
+
+/**
+ * Data for the "planner-failure" exit variant. plan_review_dispatch
+ * failed or returned an INCONCLUSIVE plan (fail-closed); the exit
+ * surfaces the plan errors, which carry their own remediation since
+ * unleash-pipeline-hardening (audit finding F5).
+ */
+export interface PlannerFailureExitData {
+  /** Plan errors from plan_review_dispatch (INCONCLUSIVE or failed). */
+  readonly reasons: readonly string[]
+}
 
 /** One unanswerable clarification question with its surrounding spec context. */
 export interface ClarifyQuestion {
@@ -74,7 +116,7 @@ export interface ClarifyExitData {
 export interface SpecReviewExitData {
   /** Workflow tier selecting the recovery guidance. */
   readonly tier: UnleashTier
-  /** HIGH/CRITICAL findings, each with context. */
+  /** Unresolved findings (pause choice or iteration cap), each with context. */
   readonly findings: readonly string[]
   /**
    * Optional change name interpolated into the openspec recovery guidance
@@ -138,6 +180,9 @@ export interface CodeReviewIterationsExhaustedExitData {
 
 /** Per-variant exit data, keyed by exit variant. */
 export type UnleashExitDataMap = {
+  readonly "tier-routing-dirty-tree": TierRoutingDirtyTreeExitData
+  readonly "tier-routing-missing-tooling": TierRoutingMissingToolingExitData
+  readonly "planner-failure": PlannerFailureExitData
   readonly clarify: ClarifyExitData
   readonly "spec-review": SpecReviewExitData
   readonly "implement-worker-failed": ImplementWorkerFailedExitData
@@ -247,6 +292,55 @@ function assemblePausedExit(parts: {
   ].join("\n")
 }
 
+/**
+ * Render the tier-routing dirty-tree exit. The route analysis was spent
+ * before the recording guard rejected the dirty tree, so the exit body
+ * carries the tool's failure message verbatim.
+ */
+function renderTierRoutingDirtyTreeExit(data: TierRoutingDirtyTreeExitData): string {
+  return assemblePausedExit({
+    step: "tier routing",
+    reason: "Dirty working tree rejected the route decision",
+    body: `**Route decision failure**: ${data.message}`,
+    whatToDoNext:
+      "Inspect `git status`, clean or stash the uncommitted work, then re-run `/uf.unleash` — tier routing re-derives the decision on the next run.",
+    resume: "Run `/uf.unleash` to continue from tier routing.",
+  })
+}
+
+/**
+ * Render the tier-routing missing-tooling exit (ROUTE_TIER_TOOLING). The
+ * tool's failure message already names the missing entry commands and the
+ * tiers whose tooling is scaffolded, so the exit body carries it verbatim.
+ */
+function renderTierRoutingMissingToolingExit(data: TierRoutingMissingToolingExitData): string {
+  return assemblePausedExit({
+    step: "tier routing",
+    reason: "Chosen tier's entry commands are not scaffolded",
+    body: `**Route decision failure**: ${data.message}`,
+    whatToDoNext:
+      "Re-route at a tier whose entry commands exist (the failure message lists them), or scaffold the missing command, then re-run `/uf.unleash`.",
+    resume: "Run `/uf.unleash` to continue from tier routing.",
+  })
+}
+
+/**
+ * Render the planner-failure exit. plan_review_dispatch failed or
+ * returned an INCONCLUSIVE plan (fail-closed); the exit surfaces the
+ * plan errors, which carry their own remediation since
+ * unleash-pipeline-hardening (audit finding F5).
+ */
+function renderPlannerFailureExit(data: PlannerFailureExitData): string {
+  return assemblePausedExit({
+    step: "review planning",
+    reason: "Review dispatch planner failed to produce a ready plan",
+    body: `### Plan errors\n\n${bulletList(data.reasons)}`,
+    whatToDoNext:
+      "Repair the configuration named in the errors (the plan errors carry remediation), then re-run the review step.",
+    resume: "Run `/uf.unleash` to continue from the review step.",
+  })
+}
+
 /** Render the clarify exit: N question(s) with per-question context. */
 function renderClarifyExit(data: ClarifyExitData): string {
   const body = data.questions
@@ -261,11 +355,11 @@ function renderClarifyExit(data: ClarifyExitData): string {
   })
 }
 
-/** Render the spec-review exit: HIGH/CRITICAL findings plus tier guidance. */
+/** Render the spec-review exit: unresolved findings plus tier guidance. */
 function renderSpecReviewExit(data: SpecReviewExitData): string {
   return assemblePausedExit({
     step: "spec review",
-    reason: "HIGH/CRITICAL findings in spec artifacts",
+    reason: "Unresolved spec review findings (pause or iteration cap)",
     body: `### Findings\n\n${bulletList(data.findings)}`,
     whatToDoNext: specReviewRecoveryGuidance(data.tier, data.change_name),
     resume: "Run `/uf.unleash` to continue from spec review.",
@@ -355,6 +449,9 @@ function renderCodeReviewIterationsExhaustedExit(
 const EXIT_RENDERERS: {
   readonly [V in UnleashExitVariant]: (data: UnleashExitDataMap[V]) => string
 } = {
+  "tier-routing-dirty-tree": renderTierRoutingDirtyTreeExit,
+  "tier-routing-missing-tooling": renderTierRoutingMissingToolingExit,
+  "planner-failure": renderPlannerFailureExit,
   clarify: renderClarifyExit,
   "spec-review": renderSpecReviewExit,
   "implement-worker-failed": renderImplementWorkerFailedExit,
@@ -366,7 +463,7 @@ const EXIT_RENDERERS: {
 }
 
 /**
- * Render a /uf.unleash paused-at exit message for one of the eight exit
+ * Render a /uf.unleash paused-at exit message for one of the eleven exit
  * variants, reproducing the command template's structure exactly: the
  * "## /uf.unleash paused at: <step>" heading, the **Reason** line, the
  * step-specific body, "### What to do next" guidance (tier-specific for

@@ -11,6 +11,7 @@ import {
   TimeoutSchema,
   executeAgentSession,
   resolveHostModel,
+  StructuralHostModelError,
   type InvocationProvenance,
   type InvocationUsage,
 } from "../../lib/agent-executor.js"
@@ -20,6 +21,11 @@ import {
   parseReviewDispatchArtifact,
   type ReviewDispatchArtifactSummary,
 } from "../../lib/review-dispatch-artifact.js"
+import {
+  BASE_REF_CANDIDATES,
+  resolveBaseRefWithDivergence,
+  type BaseRefResolution,
+} from "../../lib/review-diff.js"
 import {
   defaultGitExec,
   failure,
@@ -38,62 +44,46 @@ import {
 // Re-export envelope helpers and shared utilities for consumer convenience.
 export { defaultGitExec, failure, normalizeModelName, sanitizeSlug, success } from "../../lib/uf-workflow-types.js"
 export type { GitExec, ToolFailure, ToolResult, ToolSuccess } from "../../lib/uf-workflow-types.js"
+export type { BaseRefSource } from "../../lib/review-diff.js"
 
 // ---------------------------------------------------------------------------
 // resolve_base_ref tool
 // ---------------------------------------------------------------------------
 
-/** Valid base-ref source labels. */
-export type BaseRefSource = "upstream/main" | "origin/main" | "main"
-
-/** Structured output from resolve_base_ref. */
-export interface ResolveBaseRefData {
-  ref: BaseRefSource
-  sha: string
-  source: BaseRefSource
-}
-
-/** Ordered candidate refs to try (no network access needed). */
-const BASE_REF_CANDIDATES: readonly BaseRefSource[] = [
-  "upstream/main",
-  "origin/main",
-  "main",
-] as const
+/**
+ * Structured output from resolve_base_ref. Extends the legacy
+ * ref/sha/source fields with head_sha and diverged (backward
+ * compatible: consumers that ignore the new fields are unaffected).
+ */
+export type ResolveBaseRefData = BaseRefResolution
 
 /**
  * Factory that creates the resolve_base_ref tool with injectable
- * git executor and working directory for testability.
+ * git executor and working directory for testability. Delegates base
+ * resolution and divergence detection to the shared review-diff core.
  */
 export function createResolveBaseRefTool(exec: GitExec, cwd: string) {
   return tool({
     description:
       "Resolve the best available base ref for local review diffs. " +
       "Tries upstream/main, origin/main, then main (no network access). " +
-      "Returns the ref name, its resolved SHA, and a source label.",
+      "Returns the ref name, its resolved SHA, a source label, the current " +
+      "HEAD SHA, and a diverged flag that is true when the base is NOT an " +
+      "ancestor of HEAD (stale fork) -- do not diff against a diverged base; " +
+      "fall back to uncommitted-local mode instead.",
     execute: async () => {
-      for (const candidate of BASE_REF_CANDIDATES) {
-        try {
-          const sha = exec(["rev-parse", "--verify", candidate], cwd)
-          if (sha) {
-            const data: ResolveBaseRefData = {
-              ref: candidate,
-              sha,
-              source: candidate,
-            }
-            return { output: JSON.stringify(success(data)) }
-          }
-        } catch {
-          // Candidate not available, try next.
+      const resolved = resolveBaseRefWithDivergence(exec, cwd)
+      if (!resolved) {
+        return {
+          output: JSON.stringify(
+            failure(
+              `No resolvable base ref found. Tried: ${BASE_REF_CANDIDATES.join(", ")}`,
+              { retryable: false, code: "NO_BASE_REF" },
+            ),
+          ),
         }
       }
-      return {
-        output: JSON.stringify(
-          failure(
-            `No resolvable base ref found. Tried: ${BASE_REF_CANDIDATES.join(", ")}`,
-            { retryable: false, code: "NO_BASE_REF" },
-          ),
-        ),
-      }
+      return { output: JSON.stringify(success(resolved)) }
     },
   })
 }
@@ -101,6 +91,32 @@ export function createResolveBaseRefTool(exec: GitExec, cwd: string) {
 // ---------------------------------------------------------------------------
 // Checkpoint types
 // ---------------------------------------------------------------------------
+
+/** Failure classification for a phase pre-flight checkpoint. */
+export type PhaseFailureClassification =
+  | "pre-existing"
+  | "environmental"
+  | "change-caused"
+
+/** One classified failure in a phase checkpoint inventory. */
+export interface PhaseFailureEntry {
+  name: string
+  classification: PhaseFailureClassification
+}
+
+/** Phase-scoped checkpoint input accepted by the checkpoint tool. */
+export interface PhaseCheckpointInput {
+  number: number
+  verdict: "green" | "failed"
+  inventory: PhaseFailureEntry[]
+}
+
+/** Durable record of one phase's pre-flight checkpoint, keyed by phase number. */
+export interface PhaseCheckpointRecord {
+  verdict: "green" | "failed"
+  inventory: PhaseFailureEntry[]
+  recorded_at: string
+}
 
 /** Persistent workflow progress state (FR-001, FR-007). */
 export interface ProgressState {
@@ -110,6 +126,8 @@ export interface ProgressState {
   current_step: string
   completed_steps: string[]
   data: Record<string, unknown>
+  /** Phase-scoped checkpoint records keyed by phase number string. */
+  phases?: Record<string, PhaseCheckpointRecord>
   created_at: string
   updated_at: string
 }
@@ -249,8 +267,12 @@ function deleteState(
  * Create-or-update checkpoint state — the single mutation primitive both
  * the checkpoint tool and recordAutoCheckpoint consume. Semantics are
  * identical for both (FR-001/D3/D5): idempotent step append, shallow
- * data merge via Object.assign, timestamp refresh. Returns the updated
- * state. Throws on state I/O failure so callers fail closed.
+ * data merge via Object.assign, timestamp refresh. When `phase` is
+ * provided the step MUST be `implement-phase-<number>` and a
+ * phase-scoped record (verdict + classified failure inventory) is
+ * upserted into `state.phases`, replacing any prior record for that
+ * phase. Returns the updated state. Throws on state I/O failure so
+ * callers fail closed.
  */
 function upsertCheckpointStep(
   cwd: string,
@@ -258,7 +280,13 @@ function upsertCheckpointStep(
   command: string,
   step: string,
   data?: Record<string, unknown>,
+  phase?: PhaseCheckpointInput,
 ): ProgressState {
+  if (phase !== undefined && step !== `implement-phase-${phase.number}`) {
+    throw new Error(
+      `phase-scoped checkpoint requires step "implement-phase-${phase.number}", got "${step}"`,
+    )
+  }
   const cmd = sanitizeSlug(command)
   const now = new Date().toISOString()
 
@@ -287,6 +315,15 @@ function upsertCheckpointStep(
       Object.assign(state.data, data)
     }
     state.updated_at = now
+  }
+
+  if (phase !== undefined) {
+    state.phases ??= {}
+    state.phases[String(phase.number)] = {
+      verdict: phase.verdict,
+      inventory: phase.inventory,
+      recorded_at: now,
+    }
   }
 
   writeState(cwd, key, cmd, state)
@@ -321,7 +358,10 @@ export function createCheckpointTool(exec: GitExec, cwd: string) {
     description:
       "Record a completed workflow step to persistent storage. " +
       "Creates or updates the progress state file with the step name, " +
-      "merges optional data via shallow merge, and returns the updated state.",
+      "merges optional data via shallow merge, and returns the updated state. " +
+      "Pass `phase` with step `implement-phase-<number>` to record a phase " +
+      "pre-flight checkpoint (verdict + classified failure inventory) that " +
+      "get_progress returns under `phases`.",
     args: {
       command: z.string().describe("Command identifier (e.g. uf.unleash)"),
       step: z.string().describe("Step name to record as completed"),
@@ -331,12 +371,37 @@ export function createCheckpointTool(exec: GitExec, cwd: string) {
       key: z.string().optional().describe(
         "Optional state key override; defaults to sanitized current git branch",
       ),
+      phase: z
+        .object({
+          number: z.number().int().min(1).max(1000),
+          verdict: z.enum(["green", "failed"]),
+          inventory: z
+            .array(
+              z.object({
+                name: z.string().min(1).max(512),
+                classification: z.enum([
+                  "pre-existing",
+                  "environmental",
+                  "change-caused",
+                ]),
+              }),
+            )
+            .max(200)
+            .default([]),
+        })
+        .optional()
+        .describe(
+          "Optional phase-scoped record; requires step implement-phase-<number>. " +
+            "verdict is the phase pre-flight outcome; inventory lists classified " +
+            "failures (pre-existing, environmental, or change-caused)",
+        ),
     },
     execute: async (args: {
       command: string
       step: string
       data?: string
       key?: string
+      phase?: { number: number; verdict: "green" | "failed"; inventory?: PhaseFailureEntry[] }
     }) => {
       try {
         const key = resolveKey(exec, cwd, args.key)
@@ -346,12 +411,22 @@ export function createCheckpointTool(exec: GitExec, cwd: string) {
           dataToMerge = JSON.parse(args.data) as Record<string, unknown>
         }
 
+        const phaseRecord =
+          args.phase === undefined
+            ? undefined
+            : {
+                number: args.phase.number,
+                verdict: args.phase.verdict,
+                inventory: args.phase.inventory ?? [],
+              }
+
         const state = upsertCheckpointStep(
           cwd,
           key,
           args.command,
           args.step,
           dataToMerge,
+          phaseRecord,
         )
         return { output: JSON.stringify(success(state)) }
       } catch (err: unknown) {
@@ -820,6 +895,20 @@ export type FileExists = (path: string) => boolean
 /** Default file-existence checker backed by existsSync. */
 const defaultFileExists: FileExists = (path: string): boolean => existsSync(path)
 
+/**
+ * Entry commands each workflow tier's first delegated step depends on,
+ * relative to the repository root. The quick tier has none — its work
+ * runs inline in the /uf.unleash pipeline itself. Validation happens at
+ * route-decision recording time so a tier without its tooling fails
+ * before rubric work is spent on delegation (audit F4: the speckit route
+ * was recorded, then delegation failed ENOENT and forced a re-route).
+ */
+const TIER_ENTRY_COMMANDS: Record<WorkflowTier, readonly string[]> = {
+  speckit: [".opencode/commands/speckit.specify.md"],
+  openspec: [".opencode/commands/opsx-propose.md"],
+  quick: [],
+}
+
 /** Structured output from uf_unleash_branch_gate. */
 export interface UnleashBranchGateData {
   /** Current git branch name. */
@@ -1044,7 +1133,11 @@ const RouteDecisionInputSchema = z
  * @param cwd Repository root the decision executes against.
  * @returns The uf_unleash_route_decision tool.
  */
-export function createUnleashRouteDecisionTool(exec: GitExec, cwd: string): ReturnType<typeof tool> {
+export function createUnleashRouteDecisionTool(
+  exec: GitExec,
+  cwd: string,
+  fileExists: FileExists = defaultFileExists,
+): ReturnType<typeof tool> {
   return tool({
     description:
       "Tier routing decision for /uf.unleash: records the selected workflow tier " +
@@ -1052,7 +1145,8 @@ export function createUnleashRouteDecisionTool(exec: GitExec, cwd: string): Retu
       "description, guards against routing on a tier-named branch " +
       "(ROUTE_ON_TIER_BRANCH) and a dirty working tree (DIRTY_TREE), enforces " +
       "the risk floors (ROUTE_RISK_FLOOR rejects a quick decision carrying any " +
-      "risk signal — escalate to openspec or above), creates the " +
+      "risk signal — escalate to openspec or above), validates the chosen " +
+      "tier's entry commands exist on disk (ROUTE_TIER_TOOLING), creates the " +
       "quick/<change_name> branch for the quick tier, and returns " +
       "{tier, change_name, branch, rationale, description, issue_number}. " +
       "Auto-checkpoints tier-routing on success.",
@@ -1130,6 +1224,35 @@ export function createUnleashRouteDecisionTool(exec: GitExec, cwd: string): Retu
               failure(
                 "Working tree is not clean. Commit or stash your changes before starting a new change — tier routing must not sweep uncommitted work into it.",
                 { retryable: false, code: "DIRTY_TREE" },
+              ),
+            ),
+          }
+        }
+
+        // Audit F4 / unleash-pipeline-hardening: validate the chosen tier's
+        // entry commands BEFORE recording the decision. A tier whose first
+        // delegated step cannot run fails here with its remediation, instead
+        // of burning the rubric work and failing later at delegation time
+        // with a bare ENOENT. The error names the missing commands and the
+        // tiers whose entry commands DO exist so the caller can re-route.
+        const missingEntryCommands = TIER_ENTRY_COMMANDS[input.tier].filter(
+          (command) => !fileExists(resolve(cwd, command)),
+        )
+        if (missingEntryCommands.length > 0) {
+          const availableTiers = (Object.keys(TIER_ENTRY_COMMANDS) as WorkflowTier[])
+            .filter((tier) => tier !== input.tier)
+            .filter((tier) => TIER_ENTRY_COMMANDS[tier].length > 0)
+            .filter((tier) => TIER_ENTRY_COMMANDS[tier].every((command) => fileExists(resolve(cwd, command))))
+            .map((tier) => `${tier} (${TIER_ENTRY_COMMANDS[tier].join(", ")})`)
+          const availability =
+            availableTiers.length > 0
+              ? `Tiers whose entry commands exist here: ${availableTiers.join("; ")}.`
+              : "No other tier's entry commands exist in this repository either."
+          return {
+            output: JSON.stringify(
+              failure(
+                `The ${input.tier} tier requires the entry command(s) ${missingEntryCommands.join(", ")}, which do not exist in this repository. ${availability} Re-route at a tier whose tooling is scaffolded, or scaffold the missing command before routing.`,
+                { retryable: false, code: "ROUTE_TIER_TOOLING" },
               ),
             ),
           }
@@ -1471,6 +1594,25 @@ export interface DelegateCommandData {
   artifact_created: boolean
   /** Whether checkpoint_step was recorded through the progress state store. */
   checkpoint_recorded: boolean
+  /**
+   * Task classification declared by the caller (delegation-skill-enforcement
+   * D5); null when a command-path call omitted it. Judgment-classified and
+   * unclassified calls never carry a skill reference or absence reason.
+   */
+  task_classification: "deterministic" | "judgment" | null
+  /**
+   * Resolved repo-relative skill reference for deterministic-classified work
+   * (D5: the audit trail records the resolved reference, never the raw
+   * input); null when no skill was supplied.
+   */
+  skill: string | null
+  /**
+   * Recorded absence reason for deterministic-classified work with no
+   * applicable repo skill or script, verbatim -- the checkpoint store's
+   * JSON serialization is the sanitization boundary, no additional content
+   * filtering is applied; null when none was supplied.
+   */
+  skill_absent_reason: string | null
   /** Child session usage, when the executor reported step-finish parts. */
   usage: InvocationUsage | null
   /** Request, host-resolution, and child-report provenance. */
@@ -1517,6 +1659,21 @@ const DelegateCommandInputSchema = z
     checkpoint_step: z.string().min(1).max(128).optional(),
     phase: z.number().int().min(1).max(1000).optional(),
     timeout: TimeoutSchema.optional(),
+    // Delegation-skill-enforcement D1: the caller classifies the delegated
+    // work and the tool validates the declared answer's consequences.
+    // Absence of a skill reference is expressed by omitting the field or
+    // recording a reason, never by an empty string.
+    task_classification: z.enum(["deterministic", "judgment"]).optional(),
+    skill: z
+      .string()
+      .min(1, "empty string is invalid -- pass a skill reference or record skill_absent_reason instead")
+      .max(256)
+      .optional(),
+    skill_absent_reason: z
+      .string()
+      .min(1, "empty string is invalid -- absence is expressed by omitting the field")
+      .max(512)
+      .optional(),
   })
   .strict()
   .superRefine((input, context) => {
@@ -1528,6 +1685,44 @@ const DelegateCommandInputSchema = z
         path: ["prompt"],
         message: "one of command_path or prompt is required",
       })
+    }
+    // D1: prompt-only delegation must declare its classification. The
+    // command file is the procedure of record for command-path calls, so
+    // only those may omit it.
+    if (input.command_path === undefined && input.task_classification === undefined) {
+      context.addIssue({
+        code: "custom",
+        path: ["task_classification"],
+        message:
+          "prompt-only delegation (no command_path) must declare task_classification -- " +
+          "classify the work as deterministic or judgment before delegating",
+      })
+    }
+    // D1: name the skill, or record why none exists -- never both.
+    if (input.skill !== undefined && input.skill_absent_reason !== undefined) {
+      context.addIssue({
+        code: "custom",
+        path: ["skill"],
+        message:
+          "skill and skill_absent_reason are mutually exclusive -- " +
+          "pass a skill reference or an absence reason, never both",
+      })
+    }
+    // D1: the skill directive asserts deterministic work, so each field is
+    // valid only with deterministic classification. Judgment-classified and
+    // unclassified calls must not supply either.
+    if (input.task_classification !== "deterministic") {
+      for (const field of ["skill", "skill_absent_reason"] as const) {
+        if (input[field] !== undefined) {
+          context.addIssue({
+            code: "custom",
+            path: [field],
+            message:
+              "skill references apply to deterministic work only -- " +
+              "classify the work as deterministic or omit the field",
+          })
+        }
+      }
     }
   })
 
@@ -1589,6 +1784,118 @@ function resolveToolParam(
   return { ok: true, abs }
 }
 
+/**
+ * Repo skill roots searched for a `skill` value carrying no path
+ * separator, in resolution order (delegation-skill-enforcement D2).
+ * Both roots exist in this repository; a name present in both resolves
+ * to the first root. A future layout change is a one-constant edit.
+ */
+const SKILL_ROOTS = [".opencode/skills", ".opencode/skill"] as const
+
+/**
+ * Resolve a deterministic delegation's skill reference (design D2): a
+ * value without `/` is a skill name probed under each repo skill root in
+ * order — first root wins on collision; a value containing `/` is a
+ * repo-relative script path under the standard traversal guard.
+ * Resolution is an existence check on the injected fileExists dependency
+ * — no content is read (the child loads the skill or runs the script
+ * through its own tooling). Returns the resolved repo-relative reference
+ * for the prompt directive (task 1.4) and the audit trail (task 1.5), or
+ * the failure-output JSON (SKILL_TRAVERSAL / SKILL_NOT_FOUND, both
+ * non-retryable) naming the searched locations.
+ */
+function resolveSkillReference(
+  cwd: string,
+  skill: string,
+  fileExists: FileExists,
+): { ok: true; resolved: string } | { ok: false; failureOutput: string } {
+  const remediation =
+    "Remediation: pass an existing skill name or a repo-relative script path, " +
+    "or record skill_absent_reason when no repo skill applies; retrying will not fix this."
+  if (!skill.includes("/")) {
+    // Skill name: probe each root in order; the first existing entry wins
+    // (spec scenario: skill-root collision resolves to the first root).
+    for (const root of SKILL_ROOTS) {
+      const candidate = `${root}/${skill}/SKILL.md`
+      if (fileExists(resolve(cwd, candidate))) {
+        return { ok: true, resolved: candidate }
+      }
+    }
+    const searchedLocations = SKILL_ROOTS.map((root) => `${root}/${skill}/SKILL.md`).join(", ")
+    return {
+      ok: false,
+      failureOutput: JSON.stringify(
+        failure(
+          `Skill reference "${skill}" does not resolve. Searched: ${searchedLocations}. ${remediation}`,
+          { retryable: false, code: "SKILL_NOT_FOUND" },
+        ),
+      ),
+    }
+  }
+  // Script path: repo-relative resolution with the standard traversal
+  // guard (the command_path / expected_artifact precedent).
+  const pathParam = resolveToolParam(cwd, skill, "skill", "SKILL_TRAVERSAL")
+  if (!pathParam.ok) {
+    return { ok: false, failureOutput: pathParam.failureOutput }
+  }
+  if (!fileExists(pathParam.abs)) {
+    return {
+      ok: false,
+      failureOutput: JSON.stringify(
+        failure(
+          `Skill reference "${skill}" does not resolve. Searched: ${skill} (repo-relative path). ${remediation}`,
+          { retryable: false, code: "SKILL_NOT_FOUND" },
+        ),
+      ),
+    }
+  }
+  return { ok: true, resolved: skill }
+}
+
+/** Suffix every skill-root resolution produces (D2: `<root>/<name>/SKILL.md`). */
+const SKILL_FILE_SUFFIX = "/SKILL.md"
+
+/**
+ * The `skill`-tool invocation name for a resolved skill reference: the
+ * directory under a skill root when the reference resolved as (or points
+ * at) a skill-root SKILL.md, and the reference itself otherwise. A script
+ * reference carries no skill name — its "run the script" clause is the
+ * operative one in the directive.
+ */
+function skillToolName(resolvedReference: string): string {
+  for (const root of SKILL_ROOTS) {
+    const prefix = `${root}/`
+    if (!resolvedReference.startsWith(prefix) || !resolvedReference.endsWith(SKILL_FILE_SUFFIX)) {
+      continue
+    }
+    const name = resolvedReference.slice(prefix.length, -SKILL_FILE_SUFFIX.length)
+    if (name !== "" && !name.includes("/")) {
+      return name
+    }
+  }
+  return resolvedReference
+}
+
+/**
+ * Render the tool-rendered skill directive injected into the composed
+ * prompt (delegation-skill-enforcement D3, task 1.4). The exact wording
+ * is a design constant — tool-rendered, never agent-reconstructed
+ * (DE-003) — pinned by golden-shape tests: a header line naming the
+ * resolved reference, then the fixed paragraph instructing the child to
+ * load the skill (naming its `skill`-tool name) or run the script at the
+ * resolved path and execute its full procedure. Rendered only for calls
+ * carrying a resolved skill reference; task 1.5 records the same
+ * reference in the audit trail.
+ */
+function renderSkillDirective(resolvedReference: string): string {
+  return (
+    `Required skill: ${resolvedReference}\n\n` +
+    "This task is classified as deterministic work. Load the skill (invoke the `skill` tool " +
+    `with name "${skillToolName(resolvedReference)}") or run the script at ${resolvedReference}, ` +
+    "and execute its full procedure. Do not substitute an improvised procedure."
+  )
+}
+
 /** Standard catch-all failure envelope from a thrown unknown error. */
 function failureFromError(err: unknown, code: string, retryable = false): string {
   const msg = err instanceof Error ? err.message : String(err)
@@ -1624,10 +1931,18 @@ function expectedArtifactStopMessage(expectedArtifact: string): string {
  * - command_path is optional: prompt-only delegation (per-task implement
  *   and code-fix calls) omits it and passes the raw task or fix
  *   description through prompt
+ * - the classification contract (delegation-skill-enforcement D1):
+ *   prompt-only delegation must declare task_classification
+ *   ("deterministic" | "judgment"); skill (1-256 chars) and
+ *   skill_absent_reason (1-512 chars) are mutually exclusive, and each is
+ *   valid only with deterministic classification, so judgment-classified
+ *   and unclassified command-path calls cannot carry either field
  * - the command file is read repo-relative with traversal protection (the
  *   statePath guard) and a 1 MiB size bound
  * - the prompt is composed deterministically: command text when present,
- *   then feature-dir context, then the extra prompt
+ *   then feature-dir context, then the tool-rendered skill directive
+ *   (delegation-skill-enforcement D3, rendered only when a skill
+ *   reference resolved), then the extra prompt
  * - the child session runs through the shared executeAgentSession executor
  *   (host model resolution via parent introspection, parenting, abort
  *   linkage, timeout — default 600,000 ms) and expected_artifact is
@@ -1636,7 +1951,10 @@ function expectedArtifactStopMessage(expectedArtifact: string): string {
  * - on success (child completed and artifact verified when supplied) the
  *   tool auto-checkpoints checkpoint_step for command "uf.unleash" through
  *   the same writeState path as the checkpoint tool (D5), recording the
- *   delegation facts as data
+ *   delegation facts as data -- including the classification contract's
+ *   audit trail (delegation-skill-enforcement D5): task_classification,
+ *   the resolved skill reference, and skill_absent_reason when present,
+ *   also surfaced in the success envelope
  *
  * @param exec Git executor used to derive the auto-checkpoint state key.
  * @param cwd Repository root used for repo-relative path resolution.
@@ -1683,6 +2001,20 @@ export function createDelegateCommandTool(
       timeout: DelegateCommandInputSchema.shape.timeout.describe(
         "Optional run timeout in milliseconds (bounded to 1_800_000; default 600_000).",
       ),
+      task_classification: DelegateCommandInputSchema.shape.task_classification.describe(
+        "Optional classification of the delegated work: \"deterministic\" or \"judgment\". " +
+          "Required for prompt-only delegation (no command_path); command-path delegation may omit it.",
+      ),
+      skill: DelegateCommandInputSchema.shape.skill.describe(
+        "Optional repo skill or script reference named for deterministic-classified work " +
+          "(1-256 chars). Mutually exclusive with skill_absent_reason and valid only with " +
+          "task_classification \"deterministic\".",
+      ),
+      skill_absent_reason: DelegateCommandInputSchema.shape.skill_absent_reason.describe(
+        "Optional reason recorded when deterministic-classified work has no applicable repo " +
+          "skill or script, stating what was searched and what was found (1-512 chars). " +
+          "Mutually exclusive with skill and valid only with task_classification \"deterministic\".",
+      ),
     },
     async execute(args, context) {
       try {
@@ -1701,6 +2033,49 @@ export function createDelegateCommandTool(
           return { output: invalidInputOutput(parsed.error) }
         }
         const input = parsed.data
+
+        // Delegation-skill-enforcement D4 (task 1.2): deterministic
+        // classification requires a skill reference or a recorded absence
+        // reason. The schema owns the structural rules (mutual exclusivity,
+        // deterministic-only pairing, prompt-only classification); this rule
+        // lives in execute() because it carries a dedicated failure code
+        // with remediation text (the COMMAND_FILE_READ_FAILED /
+        // EXPECTED_ARTIFACT_MISSING precedent). Like every validation here
+        // it runs before the command-file read, host-model resolution, and
+        // the child spawn -- a rejected call costs one tool round-trip,
+        // zero sessions.
+        if (
+          input.task_classification === "deterministic" &&
+          input.skill === undefined &&
+          input.skill_absent_reason === undefined
+        ) {
+          return {
+            output: JSON.stringify(
+              failure(
+                "Deterministic-classified delegation requires a skill reference or a recorded absence reason. " +
+                  "Remediation: pass a skill reference (skill), record the absence reason (skill_absent_reason), " +
+                  "or classify the work as judgment; retrying will not fix this.",
+                { retryable: false, code: "SKILL_REFERENCE_REQUIRED" },
+              ),
+            ),
+          }
+        }
+
+        // Delegation-skill-enforcement D2 (task 1.3): a supplied skill
+        // reference MUST resolve before the command-file read, host-model
+        // resolution, and the child spawn — a rejected reference costs one
+        // tool round-trip, zero sessions. Resolution is an existence check
+        // on the injected fileExists dependency (no content read); the
+        // resolved reference feeds the prompt directive (task 1.4) and the
+        // audit trail (task 1.5).
+        let resolvedSkill: string | null = null
+        if (input.skill !== undefined) {
+          const skillRef = resolveSkillReference(cwd, input.skill, deps.fileExists)
+          if (!skillRef.ok) {
+            return { output: skillRef.failureOutput }
+          }
+          resolvedSkill = skillRef.resolved
+        }
 
         // Read the command file when supplied: repo-relative resolution with
         // traversal protection, then a size bound (invoke-agent prompt-file
@@ -1762,13 +2137,20 @@ export function createDelegateCommandTool(
         }
 
         // Compose the prompt deterministically: command text (when present),
-        // then feature-dir context, then extra instructions.
+        // then feature-dir context, then the tool-rendered skill directive
+        // (delegation-skill-enforcement D3: fixed position — after command
+        // text and feature-dir context, immediately before the extra
+        // prompt), then extra instructions. The directive renders only on
+        // calls carrying a resolved skill reference.
         const sections: string[] = []
         if (commandText !== undefined) {
           sections.push(commandText)
         }
         if (input.feature_dir !== undefined) {
           sections.push(`Feature directory: ${input.feature_dir}`)
+        }
+        if (resolvedSkill !== null) {
+          sections.push(renderSkillDirective(resolvedSkill))
         }
         if (input.prompt !== undefined) {
           sections.push(input.prompt)
@@ -1799,6 +2181,16 @@ export function createDelegateCommandTool(
               ),
             }
           }
+          if (err instanceof StructuralHostModelError) {
+            return {
+              output: JSON.stringify(
+                failure(
+                  `${err.message}. Remediation: ${err.remediation}; retrying will not fix this.`,
+                  { retryable: false, code: "HOST_MODEL_UNAVAILABLE" },
+                ),
+              ),
+            }
+          }
           return { output: failureFromError(err, "HOST_MODEL_UNAVAILABLE", true) }
         }
 
@@ -1809,7 +2201,7 @@ export function createDelegateCommandTool(
           requested_model: null,
           requested_variant: null,
           resolved_parent_model: host.identity.combined,
-          resolved_parent_variant: host.variant,
+          resolved_parent_variant: host.variant ?? null,
           reported_child_model: null,
           model_mismatch: false,
           read_only: false,
@@ -1834,14 +2226,21 @@ export function createDelegateCommandTool(
 
         if (result.status !== "success" || result.error !== null) {
           const code = result.status === "cancelled" ? "DELEGATE_CANCELLED" : "DELEGATE_FAILED"
+          const envelope = failure(
+            result.error !== null
+              ? `${result.error.code}: ${result.error.message}`
+              : `delegated run ended with status "${result.status}"`,
+            { retryable: result.error?.retryable ?? false, code },
+          )
+          // Thread the child session id into the failure envelope when the
+          // executor created one, so callers can inspect the failed or
+          // wedged child subtree directly from the delegation result
+          // (the field is omitted when no child session ever existed).
           return {
             output: JSON.stringify(
-              failure(
-                result.error !== null
-                  ? `${result.error.code}: ${result.error.message}`
-                  : `delegated run ended with status "${result.status}"`,
-                { retryable: result.error?.retryable ?? false, code },
-              ),
+              result.childSessionID !== undefined
+                ? { ...envelope, child_session_id: result.childSessionID }
+                : envelope,
             ),
           }
         }
@@ -1883,6 +2282,22 @@ export function createDelegateCommandTool(
           if (input.phase !== undefined) {
             checkpointData.phase = input.phase
           }
+          // Delegation-skill-enforcement D5 (task 1.5): the audit trail.
+          // task_classification is recorded when declared (command-path
+          // calls may omit it); skill records the RESOLVED reference, not
+          // the raw input; skill_absent_reason is recorded verbatim when
+          // present. Judgment-classified and unclassified calls add no
+          // skill keys, so calls omitting the new fields keep the exact
+          // pre-change checkpoint shape (backward compatibility).
+          if (input.task_classification !== undefined) {
+            checkpointData.task_classification = input.task_classification
+          }
+          if (resolvedSkill !== null) {
+            checkpointData.skill = resolvedSkill
+          }
+          if (input.skill_absent_reason !== undefined) {
+            checkpointData.skill_absent_reason = input.skill_absent_reason
+          }
           recordAutoCheckpoint(cwd, key, "uf.unleash", input.checkpoint_step, checkpointData)
           checkpointRecorded = true
         }
@@ -1893,6 +2308,12 @@ export function createDelegateCommandTool(
           child_session_id: result.childSessionID ?? null,
           artifact_created: artifactCreated,
           checkpoint_recorded: checkpointRecorded,
+          // Delegation-skill-enforcement D5 (task 1.5): the same audit
+          // fields the checkpoint records, surfaced machine-parseably in
+          // the success envelope (null when the call supplied none).
+          task_classification: input.task_classification ?? null,
+          skill: resolvedSkill,
+          skill_absent_reason: input.skill_absent_reason ?? null,
           usage: result.usage,
           provenance: result.provenance,
           text: result.text,
@@ -2613,9 +3034,40 @@ const ResolveClarificationInputSchema = z
       }),
     question: z.string().min(1).max(4096),
     answer: z.string().min(1).max(16384),
-    source: z.string().min(1).max(1024),
+    // unleash-interactive-clarify D4: who resolved the question. "dewey"
+    // (the default) preserves today's silent auto-resolution contract;
+    // "human" marks an answer collected through the interactive clarify
+    // ask gate.
+    resolved_by: z.enum(["dewey", "human"]).default("dewey"),
+    // Presence is conditional on resolved_by — enforced fail-closed by
+    // the superRefine below, not left to caller discipline.
+    source: z.string().min(1).max(1024).optional(),
   })
   .strict()
+  .superRefine((input, context) => {
+    // D4: dewey resolutions (an omitted resolved_by defaults to "dewey"
+    // before refinement runs) carry their provenance in source — the
+    // Clarifications entry interpolates it.
+    if (input.resolved_by === "dewey" && input.source === undefined) {
+      context.addIssue({
+        code: "custom",
+        path: ["source"],
+        message: "source is required when resolved_by is dewey or omitted",
+      })
+    }
+    // D4: a human answer originates in the ask gate itself; accepting a
+    // source would silently drop it (the human suffix does not
+    // interpolate one), so the combination is rejected instead.
+    if (input.resolved_by === "human" && input.source !== undefined) {
+      context.addIssue({
+        code: "custom",
+        path: ["source"],
+        message:
+          "source must be omitted when resolved_by is human -- " +
+          "the answer originates in the ask gate",
+      })
+    }
+  })
 
 /** Spec.md read outcome: the file text, or a pre-built failure envelope. */
 type SpecReadOutcome =
@@ -2840,15 +3292,24 @@ export function createScanClarificationsTool(
  * Factory that creates the resolve_clarification tool with injectable
  * working directory and filesystem dependencies for testability.
  *
- * Resolution semantics (OpenSpec change unleash-deterministic-tools, D8):
+ * Resolution semantics (OpenSpec change unleash-deterministic-tools, D8;
+ * provenance modes per unleash-interactive-clarify, D4):
  * - reads <feature_dir>spec.md and replaces the first marker whose
  *   extracted question equals the input question with the answer text
  *   inline (mid-line markers keep their surrounding text)
  * - no matching marker fails MARKER_NOT_FOUND, so resolving the same
  *   question twice fails on the second call — the marker is gone
- * - appends the `- Q: <question> -> A: <answer> (Dewey-resolved from
- *   <source>)` entry to ## Clarifications, creating the section at the
- *   bottom of spec.md when absent, and writes the modified file back
+ * - appends the `- Q: <question> -> A: <answer> <provenance>` entry to
+ *   ## Clarifications, creating the section at the bottom of spec.md
+ *   when absent, and writes the modified file back. The provenance
+ *   suffix follows resolved_by: "dewey" (the default when the field is
+ *   omitted) renders `(Dewey-resolved from <source>)` — byte-identical
+ *   to the pre-resolved_by template — while "human" renders
+ *   `(human-answered during /uf.unleash clarify)`
+ * - source is conditional on resolved_by, enforced fail-closed at the
+ *   schema level (superRefine, not caller discipline): required when
+ *   resolved_by is "dewey" or omitted, rejected when it is "human" —
+ *   the ask gate itself is a human answer's provenance
  * - returns {feature_dir, question, remaining} where remaining counts the
  *   markers still present after the resolution
  * - does NOT checkpoint: clarify completion is derived from markers by
@@ -2869,10 +3330,16 @@ export function createResolveClarificationTool(
       "bare-with-text [NEEDS CLARIFICATION <text>], and completely bare [NEEDS CLARIFICATION]. " +
       "Bare/empty forms extract as unscoped questions using the raw marker text as " +
       "fallback. Resolving removes the marker, writes the answer inline where the marker " +
-      "was, appends the - Q: ... -> A: ... (Dewey-resolved from ...) entry to ## " +
-      "Clarifications (creating the section at the bottom when absent), and writes spec.md " +
-      "back. Returns {feature_dir, question, remaining}. A missing marker fails " +
-      "MARKER_NOT_FOUND — resolving the same question twice fails on the second call.",
+      "was, appends the - Q: ... -> A: ... entry to ## Clarifications (creating the " +
+      "section at the bottom when absent) carrying the resolution's provenance, and " +
+      "writes spec.md back. resolved_by selects the mode: \"dewey\" (the default when " +
+      "omitted — a silent Dewey knowledge-base auto-resolution) renders the entry suffix " +
+      "(Dewey-resolved from ...); \"human\" (an answer collected through the /uf.unleash " +
+      "interactive clarify ask gate) renders (human-answered during /uf.unleash " +
+      "clarify). source is required for \"dewey\" (or an omitted resolved_by) and MUST " +
+      "be omitted for \"human\" — enforced fail-closed at the schema level. Returns " +
+      "{feature_dir, question, remaining}. A missing marker fails MARKER_NOT_FOUND — " +
+      "resolving the same question twice fails on the second call.",
     args: {
       feature_dir: ResolveClarificationInputSchema.shape.feature_dir.describe(
         "Feature directory relative to the repo root (e.g. openspec/changes/name/ or specs/018-name/), as returned by uf_unleash_branch_gate.",
@@ -2883,8 +3350,15 @@ export function createResolveClarificationTool(
       answer: ResolveClarificationInputSchema.shape.answer.describe(
         "Answer text written inline where the marker was.",
       ),
+      resolved_by: ResolveClarificationInputSchema.shape.resolved_by.describe(
+        "Who resolved the question: \"dewey\" (the default when omitted — a silent " +
+          "auto-resolution composed from Dewey knowledge-base results) or \"human\" " +
+          "(an answer collected through the /uf.unleash interactive clarify ask gate).",
+      ),
       source: ResolveClarificationInputSchema.shape.source.describe(
-        "Dewey provenance recorded in the Clarifications entry (page name or block UUID).",
+        "Dewey provenance recorded in the Clarifications entry (page name or block UUID). " +
+          "Required when resolved_by is \"dewey\" or omitted; must be omitted when " +
+          "resolved_by is \"human\" — the ask gate itself is the human answer's provenance.",
       ),
     },
     async execute(args) {
@@ -2934,8 +3408,19 @@ export function createResolveClarificationTool(
         }
 
         // Append the Q -> A entry to ## Clarifications (created at the
-        // bottom when absent) and write the modified spec.md back.
-        const entry = `- Q: ${input.question} -> A: ${input.answer} (Dewey-resolved from ${input.source})`
+        // bottom when absent) and write the modified spec.md back. The
+        // suffix records who resolved the question (design D4): dewey
+        // resolutions interpolate their source — byte-identical to the
+        // pre-resolved_by template, so the default path leaves existing
+        // callers and assertions unaffected — while ask-gate answers name
+        // the gate itself. The schema's superRefine guarantees source is
+        // present on the dewey path (and forbids it on the human path),
+        // so the interpolation never sees undefined.
+        const provenance =
+          input.resolved_by === "human"
+            ? "(human-answered during /uf.unleash clarify)"
+            : `(Dewey-resolved from ${input.source})`
+        const entry = `- Q: ${input.question} -> A: ${input.answer} ${provenance}`
         const updatedText = appendClarificationsEntry(updatedLines.join("\n"), entry)
         try {
           await deps.writeText(specPath, updatedText)
@@ -3717,6 +4202,24 @@ const ExitPhaseSchema = z.number().int().min(1).max(1000)
 const UnleashExitInputSchema = z.discriminatedUnion("variant", [
   z
     .object({
+      variant: z.literal("tier-routing-dirty-tree"),
+      message: z.string().min(1).max(16384),
+    })
+    .strict(),
+  z
+    .object({
+      variant: z.literal("tier-routing-missing-tooling"),
+      message: z.string().min(1).max(16384),
+    })
+    .strict(),
+  z
+    .object({
+      variant: z.literal("planner-failure"),
+      reasons: ExitStringListSchema,
+    })
+    .strict(),
+  z
+    .object({
       variant: z.literal("clarify"),
       questions: ExitQuestionsSchema,
     })
@@ -3810,20 +4313,34 @@ const UnleashDemoInputSchema = z
 export function createFormatUnleashExitTool(cwd: string): ReturnType<typeof tool> {
   return tool({
     description:
-      "Render a /uf.unleash paused-at exit message for one of the eight exit variants " +
-      "(clarify, spec-review, implement-worker-failed, implement-merge-conflict, " +
+      "Render a /uf.unleash paused-at exit message for one of the eleven exit " +
+      "variants (tier-routing-dirty-tree, tier-routing-missing-tooling, " +
+      "planner-failure, clarify, spec-review, implement-worker-failed, " +
+      "implement-merge-conflict, " +
       "implement-phase-checkpoint, code-review-preflight, code-review-no-success, " +
       "code-review-iterations-exhausted). Returns {text} — the exact template markdown " +
       "(heading, reason, body, What to do next, Then resume) to emit verbatim.",
     args: {
       variant: z.enum(UNLEASH_EXIT_VARIANTS).describe(
-        "Exit scenario to render. Each variant requires its own fields: clarify → questions; " +
+        "Exit scenario to render. Each variant requires its own fields: " +
+          "tier-routing-dirty-tree and tier-routing-missing-tooling → message " +
+          "(the uf_unleash_route_decision failure text); " +
+          "planner-failure → reasons (the plan errors); " +
+          "clarify → questions; " +
           "spec-review → tier, findings; implement-worker-failed → phase, failed_task, error; " +
           "implement-merge-conflict → phase, conflicting_files; implement-phase-checkpoint → " +
           "phase, failed_command, output; code-review-preflight → findings; " +
           "code-review-no-success → reasons; code-review-iterations-exhausted → " +
           "persistent_findings (circular_dependencies optional).",
       ),
+      message: z
+        .string()
+        .min(1)
+        .max(16384)
+        .describe(
+          "tier-routing-dirty-tree and tier-routing-missing-tooling: the uf_unleash_route_decision failure message to surface in the exit body.",
+        )
+        .optional(),
       questions: ExitQuestionsSchema.describe(
         "clarify: the unanswerable questions, each {question, context} as scan_clarifications extracted.",
       ).optional(),
@@ -3831,7 +4348,7 @@ export function createFormatUnleashExitTool(cwd: string): ReturnType<typeof tool
         "spec-review: workflow tier selecting the recovery guidance (speckit or openspec).",
       ).optional(),
       findings: ExitStringListSchema.describe(
-        "spec-review (HIGH/CRITICAL findings with context) or code-review-preflight " +
+        "spec-review (unresolved findings with context) or code-review-preflight " +
           "(branch-caused failures as CRITICAL findings with full output).",
       ).optional(),
       change_name: ExitChangeNameSchema.describe(
@@ -4368,15 +4885,15 @@ export function createWriteUnleashSummaryTool(exec: GitExec, cwd: string): Retur
  * into write_unleash_summary above as the mechanism of record, absorbing
  * the persist-unleash-summary contract (artifact path, flat camelCase
  * content fields, provenance block, INVALID_UNLEASH_SUMMARY validation,
- * hardened write). This factory preserves that change's FR-005
- * registration surface — the tool map exposes the same implementation
- * under `persist_unleash_summary`, and the exported factory keeps its
- * (exec, cwd) signature — while delegating to the single implementation
- * so the two names can never drift.
+ * hardened write). The unleash-pipeline-hardening change removed the
+ * redundant `persist_unleash_summary` registration so the tool map
+ * lists exactly one summary tool; this factory remains an exported
+ * alias with its (exec, cwd) signature, delegating to the single
+ * implementation so the two names can never drift.
  *
  * @param exec Git executor used to read the current branch.
  * @param cwd Repository root the artifact directory resolves against.
- * @returns The write_unleash_summary tool, registered as persist_unleash_summary.
+ * @returns The write_unleash_summary tool.
  */
 export function createPersistUnleashSummaryTool(exec: GitExec, cwd: string): ReturnType<typeof tool> {
   return createWriteUnleashSummaryTool(exec, cwd)
@@ -4398,10 +4915,6 @@ const UfWorkflowPlugin = {
         get_progress: createGetProgressTool(defaultGitExec, cwd),
         clear_progress: createClearProgressTool(defaultGitExec, cwd),
         normalize_model_name: createNormalizeModelNameTool(),
-        // Compatibility registration (persist-unleash-summary FR-005): the
-        // same write_unleash_summary implementation, exposed under the name
-        // that change specced. See createPersistUnleashSummaryTool.
-        persist_unleash_summary: createPersistUnleashSummaryTool(defaultGitExec, cwd),
         git_fetch: createGitFetchTool(defaultGitExec, cwd),
         git_push: createGitPushTool(defaultGitExec, cwd),
         git_push_force_with_lease: createGitPushForceWithLeaseTool(defaultGitExec, cwd),

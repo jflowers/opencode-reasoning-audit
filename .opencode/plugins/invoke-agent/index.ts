@@ -196,7 +196,7 @@ export async function invokeAgent(
     provenance = {
       ...provenance,
       resolved_parent_model: host.identity.combined,
-      resolved_parent_variant: host.variant,
+      resolved_parent_variant: host.variant ?? null,
     }
   } else {
     selectedModel = directModelIdentity(input.model)

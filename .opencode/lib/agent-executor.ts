@@ -222,19 +222,44 @@ export function validateTimeout(timeoutMilliseconds: number): void {
 }
 
 /**
+ * Raised when host model resolution fails for a structural reason that
+ * retrying cannot fix (wrong message role, missing identity, invalid
+ * variant). Carries a remediation string naming how to fix the cause.
+ * Transient failures (API errors reading the parent message) remain
+ * plain `Error`s so callers can keep them retryable.
+ */
+export class StructuralHostModelError extends Error {
+  readonly remediation: string
+
+  constructor(message: string, remediation: string) {
+    super(message)
+    this.name = "StructuralHostModelError"
+    this.remediation = remediation
+  }
+}
+
+/**
  * Introspects the parent session's current assistant message to resolve
  * the active host model identity and variant.
  *
+ * The variant is optional: when the provider does not populate a variant
+ * field on the assistant message, resolution succeeds with
+ * `variant: undefined` and the child session is spawned without a variant
+ * override. A present-but-invalid variant still fails.
+ *
  * @param context Client and session context for the introspection call.
  * @param signal Abort signal for cancellation.
- * @returns Resolved model identity and variant from the host session.
- * @throws When the parent message is unavailable, not an assistant message,
- *   or the model identity/variant cannot be extracted.
+ * @returns Resolved model identity and variant (or undefined when the
+ *   host assistant message carries no variant) from the host session.
+ * @throws {StructuralHostModelError} When the parent message is not an
+ *   assistant message, the model identity cannot be extracted, or the
+ *   variant is present but invalid — structural causes retrying cannot fix.
+ * @throws When the parent message is unavailable (transient API failure).
  */
 export async function resolveHostModel(
   context: HostResolutionContext,
   signal: AbortSignal,
-): Promise<{ readonly identity: ModelIdentity; readonly variant: string }> {
+): Promise<{ readonly identity: ModelIdentity; readonly variant: string | undefined }> {
   const response = await context.client.session.message({
     path: { id: context.sessionID, messageID: context.messageID },
     query: { directory: context.directory },
@@ -244,21 +269,30 @@ export async function resolveHostModel(
     throw new Error(responseFailure("current assistant message is unavailable", response))
   }
   if (response.data.info.role !== "assistant") {
-    throw new Error("current message is not an assistant message")
+    throw new StructuralHostModelError(
+      "current message is not an assistant message",
+      "re-invoke the command so host introspection reads the current assistant turn",
+    )
   }
 
   const assistant = response.data.info as CurrentAssistantWithVariant<CurrentAssistant>
   const combined = reportedModel(assistant.providerID, assistant.modelID)
   if (combined === null || combined.length > 256) {
-    throw new Error("current assistant model identity is unavailable")
+    throw new StructuralHostModelError(
+      "current assistant model identity is unavailable",
+      "run the command from a provider that reports the active model identity",
+    )
   }
-  const variant = VariantSchema.safeParse(assistant.variant)
-  if (!variant.success) {
-    throw new Error("current assistant active variant is unavailable or invalid")
+  const parsed = assistant.variant === undefined ? undefined : VariantSchema.safeParse(assistant.variant)
+  if (parsed !== undefined && !parsed.success) {
+    throw new StructuralHostModelError(
+      "current assistant active variant is invalid",
+      "run the command from a provider whose active variant is a valid slug",
+    )
   }
   return {
     identity: { providerID: assistant.providerID, modelID: assistant.modelID, combined },
-    variant: variant.data,
+    variant: parsed?.data,
   }
 }
 
